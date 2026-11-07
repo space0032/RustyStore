@@ -1,0 +1,129 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: rustystore
+      POSTGRES_PASSWORD: rustystore
+      POSTGRES_DB: rustystore
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rustystore -d rustystore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: crates/coordinator/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
+      COORDINATOR_ADDR: 0.0.0.0:50051
+      CHUNK_SIZE_BYTES: "4194304"
+      REPLICATION_FACTOR: "3"
+      RUST_LOG: info
+    ports:
+      - "50051:50051"
+      - "8081:8081"
+
+  storage-node-1:
+    build:
+      context: .
+      dockerfile: crates/storage-node/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_started
+    environment:
+      COORDINATOR_ADDR: coordinator:50051
+      NODE_ADDR: 0.0.0.0:50051
+      STORAGE_PATH: /data/chunks
+      DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
+      RUST_LOG: info
+    ports:
+      - "50052:50051"
+    volumes:
+      - sn1_data:/data/chunks
+
+  storage-node-2:
+    build:
+      context: .
+      dockerfile: crates/storage-node/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_started
+    environment:
+      COORDINATOR_ADDR: coordinator:50051
+      NODE_ADDR: 0.0.0.0:50051
+      STORAGE_PATH: /data/chunks
+      DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
+      RUST_LOG: info
+    ports:
+      - "50053:50051"
+    volumes:
+      - sn2_data:/data/chunks
+
+  storage-node-3:
+    build:
+      context: .
+      dockerfile: crates/storage-node/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_started
+    environment:
+      COORDINATOR_ADDR: coordinator:50051
+      NODE_ADDR: 0.0.0.0:50051
+      STORAGE_PATH: /data/chunks
+      DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
+      RUST_LOG: info
+    ports:
+      - "50054:50051"
+    volumes:
+      - sn3_data:/data/chunks
+
+  gateway:
+    build:
+      context: .
+      dockerfile: crates/gateway/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_started
+    environment:
+      COORDINATOR_ADDR: coordinator:50051
+      GATEWAY_ADDR: 0.0.0.0:8080
+      CHUNK_SIZE_BYTES: "4194304"
+      REPLICATION_FACTOR: "3"
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:
+  minio_data:
+  sn1_data:
+  sn2_data:
+  sn3_data:

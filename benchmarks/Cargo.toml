@@ -1,0 +1,16 @@
+[package]
+name = "rustystore_benchmarks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+criterion = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+
+[[bench]]
+name = "chunk_hashing"
+harness = false
+
+[profile.release]
+opt-level = 3

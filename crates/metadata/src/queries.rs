@@ -1,0 +1,298 @@
+//! Metadata queries.
+//!
+//! All mutating operations run inside a transaction. Incomplete uploads are
+//! never visible to readers because `files.status` is only flipped to
+//! `committed` inside the finalizing transaction.
+
+use crate::models::*;
+use sqlx::postgres::PgPool;
+use uuid::Uuid;
+
+/// Metadata repository handle.
+pub struct MetadataStore {
+    pool: PgPool,
+}
+
+impl MetadataStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    // ---- nodes -----------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_node(
+        &self,
+        node_id: Uuid,
+        addr: &str,
+        grpc_addr: &str,
+        capacity_bytes: i64,
+        available_bytes: i64,
+        used_bytes: i64,
+        lease_expiry: chrono::DateTime<chrono::Utc>,
+        version: Option<&str>,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO storage_nodes (node_id, addr, grpc_addr, capacity_bytes, available_bytes, used_bytes, lease_expiry, last_seen, healthy, version, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,now(),true,$8,now())
+            ON CONFLICT (node_id) DO UPDATE SET
+              addr=EXCLUDED.addr,
+              grpc_addr=EXCLUDED.grpc_addr,
+              capacity_bytes=EXCLUDED.capacity_bytes,
+              available_bytes=EXCLUDED.available_bytes,
+              used_bytes=EXCLUDED.used_bytes,
+              lease_expiry=EXCLUDED.lease_expiry,
+              last_seen=now(),
+              healthy=true,
+              version=EXCLUDED.version,
+              updated_at=now()
+            "#,
+        )
+        .bind(node_id)
+        .bind(addr)
+        .bind(grpc_addr)
+        .bind(capacity_bytes)
+        .bind(available_bytes)
+        .bind(used_bytes)
+        .bind(lease_expiry)
+        .bind(version)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_node_unhealthy(&self, node_id: Uuid) -> sqlx::Result<()> {
+        sqlx::query("UPDATE storage_nodes SET healthy=false, updated_at=now() WHERE node_id=$1")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn healthy_nodes(&self) -> sqlx::Result<Vec<StorageNodeRow>> {
+        let rows =
+            sqlx::query_as::<_, StorageNodeRow>("SELECT * FROM storage_nodes WHERE healthy=true")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    pub async fn all_nodes(&self) -> sqlx::Result<Vec<StorageNodeRow>> {
+        let rows = sqlx::query_as::<_, StorageNodeRow>("SELECT * FROM storage_nodes")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    // ---- files -----------------------------------------------------------
+
+    pub async fn create_file(
+        &self,
+        file_id: Uuid,
+        filename: &str,
+        total_size: i64,
+        chunk_size: i64,
+        chunk_count: i32,
+        replication_factor: i32,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO files (file_id, filename, total_size, chunk_size, chunk_count, replication_factor, status, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,'uploading',now(),now())
+            "#,
+        )
+        .bind(file_id)
+        .bind(filename)
+        .bind(total_size)
+        .bind(chunk_size)
+        .bind(chunk_count)
+        .bind(replication_factor)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Commit a file manifest: flip status to committed inside a transaction.
+    pub async fn commit_file(&self, file_id: Uuid) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE files SET status='committed', updated_at=now() WHERE file_id=$1 AND status='uploading'")
+            .bind(file_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_file(&self, file_id: Uuid) -> sqlx::Result<Option<FileRow>> {
+        let row = sqlx::query_as::<_, FileRow>("SELECT * FROM files WHERE file_id=$1")
+            .bind(file_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    // ---- chunks ----------------------------------------------------------
+
+    pub async fn insert_chunk(
+        &self,
+        chunk_id: Uuid,
+        sha256_hex: &str,
+        size_bytes: i64,
+        chunk_index: i32,
+        file_id: Uuid,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO chunks (chunk_id, sha256_hex, size_bytes, chunk_index, file_id)
+            VALUES ($1,$2,$3,$4,$5)
+            "#,
+        )
+        .bind(chunk_id)
+        .bind(sha256_hex)
+        .bind(size_bytes)
+        .bind(chunk_index)
+        .bind(file_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn chunks_for_file(&self, file_id: Uuid) -> sqlx::Result<Vec<ChunkRow>> {
+        let rows = sqlx::query_as::<_, ChunkRow>(
+            "SELECT * FROM chunks WHERE file_id=$1 ORDER BY chunk_index ASC",
+        )
+        .bind(file_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // ---- replicas --------------------------------------------------------
+
+    pub async fn insert_replica(
+        &self,
+        chunk_id: Uuid,
+        node_id: Uuid,
+        durable: bool,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO chunk_replicas (chunk_id, node_id, durable)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (chunk_id, node_id) DO NOTHING
+            "#,
+        )
+        .bind(chunk_id)
+        .bind(node_id)
+        .bind(durable)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn replicas_for_chunk(&self, chunk_id: Uuid) -> sqlx::Result<Vec<ChunkReplicaRow>> {
+        let rows =
+            sqlx::query_as::<_, ChunkReplicaRow>("SELECT * FROM chunk_replicas WHERE chunk_id=$1")
+                .bind(chunk_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    pub async fn durable_replica_count(&self, chunk_id: Uuid) -> sqlx::Result<i64> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM chunk_replicas WHERE chunk_id=$1 AND durable=true",
+        )
+        .bind(chunk_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    // ---- upload sessions -------------------------------------------------
+
+    pub async fn create_upload_session(
+        &self,
+        upload_id: Uuid,
+        file_id: Option<Uuid>,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO upload_sessions (upload_id, file_id, status, created_at) VALUES ($1,$2,'pending',now())",
+        )
+        .bind(upload_id)
+        .bind(file_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn abort_upload_session(&self, upload_id: Uuid) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE upload_sessions SET status='aborted', completed_at=now() WHERE upload_id=$1",
+        )
+        .bind(upload_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ---- replication tasks -----------------------------------------------
+
+    pub async fn create_replication_task(
+        &self,
+        task_id: Uuid,
+        chunk_id: Uuid,
+        source_node_id: Option<Uuid>,
+        target_node_id: Uuid,
+        max_attempts: i32,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO replication_tasks (task_id, chunk_id, source_node_id, target_node_id, status, attempts, max_attempts, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,'pending',0,$5,now(),now())
+            "#,
+        )
+        .bind(task_id)
+        .bind(chunk_id)
+        .bind(source_node_id)
+        .bind(target_node_id)
+        .bind(max_attempts)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn pending_replication_tasks(&self) -> sqlx::Result<Vec<ReplicationTaskRow>> {
+        let rows = sqlx::query_as::<_, ReplicationTaskRow>(
+            "SELECT * FROM replication_tasks WHERE status='pending' ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn mark_task_in_progress(&self, task_id: Uuid) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE replication_tasks SET status='in_progress', updated_at=now() WHERE task_id=$1",
+        )
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_task_done(&self, task_id: Uuid) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE replication_tasks SET status='done', updated_at=now() WHERE task_id=$1",
+        )
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}

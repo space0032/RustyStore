@@ -1,0 +1,244 @@
+syntax = "proto3";
+
+package storage;
+
+option go_package = "storage";
+
+// ---------------------------------------------------------------------------
+// Common
+// ---------------------------------------------------------------------------
+
+message Empty {}
+
+// ---------------------------------------------------------------------------
+// Node registration & heartbeat
+// ---------------------------------------------------------------------------
+
+message RegisterRequest {
+  string addr = 1;            // host:port of this node
+  string grpc_addr = 2;       // gRPC listen addr
+  int64 capacity_bytes = 3;   // total disk capacity
+  string node_version = 4;
+}
+
+message RegisterResponse {
+  string node_id = 1;
+  int64 lease_ttl_ms = 2;
+  int64 chunk_size_bytes = 3;
+  int32 replication_factor = 4;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  int64 available_bytes = 2;
+  int64 used_bytes = 3;
+  int32 chunk_count = 4;
+}
+
+message HeartbeatResponse {
+  int64 lease_ttl_ms = 1;
+  bool healthy = 2;
+}
+
+message CapacityReport {
+  string node_id = 1;
+  int64 capacity_bytes = 2;
+  int64 available_bytes = 3;
+  int64 used_bytes = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Chunk references
+// ---------------------------------------------------------------------------
+
+message ChunkReference {
+  string chunk_id = 1;
+  string file_id = 2;
+  int64 chunk_index = 3;
+  int64 size_bytes = 4;
+  string sha256_hex = 5;
+  int32 replication_factor = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Chunk storage (streaming transfer)
+// ---------------------------------------------------------------------------
+
+message StoreChunkRequest {
+  oneof payload {
+    ChunkReference meta = 1;
+    bytes data = 2;
+  }
+}
+
+message StoreChunkResponse {
+  string chunk_id = 1;
+  bool durable = 2;  // true only after fsync + atomic rename
+}
+
+message RetrieveChunkRequest {
+  string chunk_id = 1;
+  string expected_sha256 = 2;
+}
+
+message RetrieveChunkResponse {
+  oneof payload {
+    ChunkReference meta = 1;
+    bytes data = 2;
+  }
+}
+
+message DeleteChunkRequest {
+  string chunk_id = 1;
+}
+
+message DeleteChunkResponse {
+  bool deleted = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Replication (coordinator -> storage node, and node -> node)
+// ---------------------------------------------------------------------------
+
+message ReplicateChunkRequest {
+  string chunk_id = 1;
+  string target_node_id = 2;
+  string source_node_id = 3;
+  string expected_sha256 = 4;
+}
+
+message ReplicateChunkResponse {
+  string chunk_id = 1;
+  bool ok = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+
+message HealthCheckRequest {}
+message HealthCheckResponse {
+  bool serving = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Service definitions
+// ---------------------------------------------------------------------------
+
+service NodeService {
+  rpc Register(stream RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+  rpc ReportCapacity(CapacityReport) returns (Empty);
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+service ChunkService {
+  rpc StoreChunk(stream StoreChunkRequest) returns (StoreChunkResponse);
+  rpc RetrieveChunk(RetrieveChunkRequest) returns (stream RetrieveChunkResponse);
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+  rpc ReplicateChunk(stream ReplicateChunkRequest) returns (ReplicateChunkResponse);
+}
+
+service ClusterService {
+  // Coordinator -> storage node
+  rpc AssignReplica(stream ReplicateChunkRequest) returns (ReplicateChunkResponse);
+  rpc NodeHeartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+
+  // Gateway -> Coordinator
+  rpc CreateUploadSession(CreateUploadSessionRequest) returns (CreateUploadSessionResponse);
+  rpc GetChunkPlan(GetChunkPlanRequest) returns (GetChunkPlanResponse);
+  rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
+  rpc GetManifest(GetManifestRequest) returns (GetManifestResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Gateway -> Coordinator messages
+// ---------------------------------------------------------------------------
+
+message CreateUploadSessionRequest {
+  string filename = 1;
+  int64 total_size = 2;
+  int64 chunk_size = 3;
+  int32 replication_factor = 4;
+}
+
+message CreateUploadSessionResponse {
+  string upload_id = 1;
+  string file_id = 2;
+}
+
+message GetChunkPlanRequest {
+  string upload_id = 1;
+  int64 chunk_index = 2;
+}
+
+message GetChunkPlanResponse {
+  string chunk_id = 1;
+  repeated string node_ids = 2;
+}
+
+message CompleteUploadRequest {
+  string upload_id = 1;
+  string file_id = 2;
+  repeated ChunkManifest chunks = 3;
+}
+
+message ChunkManifest {
+  string chunk_id = 1;
+  int64 chunk_index = 2;
+  int64 size_bytes = 3;
+  string sha256_hex = 4;
+}
+
+message CompleteUploadResponse {
+  string file_id = 1;
+}
+
+message GetManifestRequest {
+  string file_id = 1;
+}
+
+message GetManifestResponse {
+  string file_id = 1;
+  string filename = 2;
+  int64 total_size = 3;
+  int64 chunk_size = 4;
+  int32 chunk_count = 5;
+  int32 replication_factor = 6;
+  repeated ChunkLocation chunks = 7;
+}
+
+message ChunkLocation {
+  string chunk_id = 1;
+  int64 chunk_index = 2;
+  int64 size_bytes = 3;
+  string sha256_hex = 4;
+  repeated string node_ids = 5;
+}
+
+message ListNodesRequest {}
+message ListNodesResponse {
+  repeated NodeInfo nodes = 1;
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string addr = 2;
+  string grpc_addr = 3;
+  bool healthy = 4;
+  int64 available_bytes = 5;
+  int64 capacity_bytes = 6;
+}
+
+message GetStatsRequest {}
+message GetStatsResponse {
+  int32 total_nodes = 1;
+  int32 healthy_nodes = 2;
+  int64 total_capacity_bytes = 3;
+  int64 total_available_bytes = 4;
+  int64 total_files = 5;
+  int64 total_chunks = 6;
+  int64 under_replicated_chunks = 7;
+}
