@@ -1,31 +1,225 @@
-//! Coordinator gRPC service implementation.
+//! Coordinator gRPC service implementation + background tasks.
 //!
-//! Implements NodeService, ChunkService, and ClusterService from the proto
-//! contract. Phase 3 adds gateway-facing RPCs: upload sessions, chunk plans,
-//! complete upload, manifest lookup, node listing, and cluster stats.
+//! Implements NodeService (Register, Heartbeat, ReportCapacity, Check) and
+//! ClusterService (gateway-facing RPCs). Runs background tasks for lease
+//! expiry monitoring, under-replication detection, and recovery scheduling.
 
 use crate::placement::place_replicas;
+#[allow(unused_imports)]
+use crate::types::{ChunkLocationEntry, ChunkManifestEntry, ClusterStats, Manifest, NodeInfoEntry};
 use futures_util::stream::Stream;
 use metadata::MetadataStore;
+use metadata::models::StorageNodeRow;
 use proto::storage::{
     CapacityReport, ChunkLocation, CompleteUploadRequest, CompleteUploadResponse,
     CreateUploadSessionRequest, CreateUploadSessionResponse, Empty, GetChunkPlanRequest,
     GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
     GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, HeartbeatResponse,
     ListNodesRequest, ListNodesResponse, NodeInfo, RegisterRequest, RegisterResponse,
+    ReplicateChunkRequest, ReplicateChunkResponse,
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::NodeService,
 };
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::task::JoinHandle;
 use tonic::{Request, Response, Status, Streaming};
+use tracing::{info, warn};
 use uuid::Uuid;
+
+type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
+
+/// The Coordinator: gRPC service + background recovery tasks.
+pub struct Coordinator {
+    service: CoordinatorService,
+    #[allow(dead_code)]
+    lease_monitor_handle: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
+    replication_monitor_handle: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
+    recovery_scheduler_handle: Option<JoinHandle<()>>,
+}
+
+impl Coordinator {
+    pub fn new(store: Arc<MetadataStore>, replication_factor: i32, chunk_size_bytes: i64) -> Self {
+        let service = CoordinatorService::new(store.clone(), replication_factor, chunk_size_bytes);
+
+        // Lease expiry monitor: marks nodes unhealthy when lease expires.
+        let lease_monitor = {
+            let store = store.clone();
+            let interval = Duration::from_secs(5);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(interval);
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = store.expire_leases().await {
+                        warn!("lease expiry monitor error: {e}");
+                    }
+                }
+            })
+        };
+
+        // Under-replication detector: finds under-replicated chunks and
+        // creates replication tasks.
+        let replication_monitor = {
+            let store = store.clone();
+            let rf = replication_factor;
+            let interval = Duration::from_secs(10);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(interval);
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = Self::detect_under_replicated(&store, rf).await {
+                        warn!("under-replication detector error: {e}");
+                    }
+                }
+            })
+        };
+
+        // Recovery scheduler: claims replication tasks and executes them
+        // with bounded concurrency.
+        let recovery_scheduler = {
+            let store = store.clone();
+            let interval = Duration::from_secs(5);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(interval);
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = Self::run_recovery_cycle(&store).await {
+                        warn!("recovery scheduler error: {e}");
+                    }
+                }
+            })
+        };
+
+        Self {
+            service,
+            lease_monitor_handle: Some(lease_monitor),
+            replication_monitor_handle: Some(replication_monitor),
+            recovery_scheduler_handle: Some(recovery_scheduler),
+        }
+    }
+
+    /// Detect under-replicated chunks and create replication tasks.
+    async fn detect_under_replicated(
+        store: &Arc<MetadataStore>,
+        _default_rf: i32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let under_replicated = store.under_replicated_chunks().await?;
+
+        for (chunk_id, _file_id, _required, _actual) in under_replicated {
+            // Find a healthy source node that has a durable replica of this chunk.
+            let replicas = store.replicas_for_chunk(chunk_id).await?;
+            let healthy_nodes = store.healthy_nodes().await?;
+
+            let source_node_id = replicas.iter().filter(|r| r.durable).find_map(|r| {
+                healthy_nodes
+                    .iter()
+                    .find(|n| n.node_id == r.node_id)
+                    .map(|n| n.node_id)
+            });
+
+            let Some(source_node_id) = source_node_id else {
+                warn!("chunk {chunk_id} has no healthy source replica");
+                continue;
+            };
+
+            // Find healthy target nodes that don't already have this chunk.
+            let existing_nodes: Vec<Uuid> = replicas.iter().map(|r| r.node_id).collect();
+            let target_candidates: Vec<StorageNodeRow> = healthy_nodes
+                .iter()
+                .filter(|n| !existing_nodes.contains(&n.node_id))
+                .cloned()
+                .collect();
+
+            if target_candidates.is_empty() {
+                warn!("chunk {chunk_id} has no healthy target node for replication");
+                continue;
+            }
+
+            // Use placement strategy to pick a target.
+            let targets = place_replicas(&target_candidates, 0, 1, &existing_nodes)?;
+
+            if let Some(target_node_id) = targets.first() {
+                let task_id = Uuid::new_v4();
+                store
+                    .create_replication_task(
+                        task_id,
+                        chunk_id,
+                        Some(source_node_id),
+                        *target_node_id,
+                        5,
+                    )
+                    .await?;
+                info!(
+                    "created replication task for chunk {chunk_id}: node {source_node_id} -> {}",
+                    target_node_id
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run one recovery cycle: claim a task and execute it.
+    async fn run_recovery_cycle(
+        store: &Arc<MetadataStore>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Claim a pending task.
+        let Some(task) = store.claim_replication_task().await? else {
+            return Ok(()); // no pending tasks
+        };
+
+        let chunk_id = task.chunk_id;
+        let target_node_id = task.target_node_id;
+
+        // Get chunk info for the replication.
+        let replicas = store.replicas_for_chunk(chunk_id).await?;
+        let has_durable_replica = replicas.iter().any(|r| r.durable);
+
+        if !has_durable_replica {
+            warn!(
+                "chunk {chunk_id} has no durable replica, skipping task {}",
+                task.task_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        }
+
+        // TODO: In Phase 5/6, actually perform the gRPC replication transfer
+        // from source to target node. For Phase 4, mark the task as done
+        // after recording the replica intent.
+        // Record the replica placement intent (durable=false until confirmed
+        // by the target node in Phase 5/6).
+        store
+            .insert_replica(chunk_id, target_node_id, false)
+            .await?;
+        store.mark_task_done(task.task_id).await?;
+
+        info!(
+            "recovery task {} complete: chunk {} -> node {}",
+            task.task_id, chunk_id, target_node_id
+        );
+
+        Ok(())
+    }
+
+    pub fn service(&self) -> CoordinatorService {
+        self.service.clone()
+    }
+
+    pub fn into_server(self) -> ClusterServiceServer<CoordinatorService> {
+        self.service.into_server()
+    }
+}
 
 #[derive(Clone)]
 pub struct CoordinatorService {
     store: Arc<MetadataStore>,
     replication_factor: i32,
-    #[allow(dead_code)]
     chunk_size_bytes: i64,
 }
 
@@ -45,27 +239,125 @@ impl CoordinatorService {
 
 #[tonic::async_trait]
 impl NodeService for CoordinatorService {
-    type HeartbeatStream = Pin<Box<dyn Stream<Item = Result<HeartbeatResponse, Status>> + Send>>;
+    type HeartbeatStream = BoxStream<HeartbeatResponse>;
 
     async fn register(
         &self,
-        _request: Request<Streaming<RegisterRequest>>,
+        request: Request<Streaming<RegisterRequest>>,
     ) -> Result<Response<RegisterResponse>, Status> {
-        Err(Status::unimplemented("register not yet implemented"))
+        let mut stream = request.into_inner();
+
+        // Collect the registration message.
+        let reg = stream
+            .message()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::invalid_argument("empty register stream"))?;
+
+        let node_id = Uuid::new_v4();
+        let lease_ttl_ms = 15_000i64;
+        let lease_expiry = chrono::Utc::now() + chrono::TimeDelta::try_seconds(15).unwrap();
+
+        self.store
+            .upsert_node(
+                node_id,
+                &reg.addr,
+                &reg.grpc_addr,
+                reg.capacity_bytes,
+                0, // available_bytes not in RegisterRequest
+                0, // used_bytes not in RegisterRequest
+                lease_expiry,
+                Some(reg.node_version.as_str()),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        info!(
+            "node registered: node_id={} addr={} capacity={}",
+            node_id, reg.addr, reg.capacity_bytes
+        );
+
+        Ok(Response::new(RegisterResponse {
+            node_id: node_id.to_string(),
+            lease_ttl_ms,
+            chunk_size_bytes: self.chunk_size_bytes,
+            replication_factor: self.replication_factor,
+        }))
     }
 
     async fn heartbeat(
         &self,
-        _request: Request<Streaming<HeartbeatRequest>>,
+        request: Request<Streaming<HeartbeatRequest>>,
     ) -> Result<Response<Self::HeartbeatStream>, Status> {
-        Err(Status::unimplemented("heartbeat not yet implemented"))
+        let mut stream = request.into_inner();
+        let store = self.store.clone();
+
+        // Process heartbeats as a stream: update lease on each heartbeat.
+        let response_stream = async_stream::stream! {
+            while let Ok(Some(hb)) = stream.message().await {
+                let node_id = match Uuid::parse_str(&hb.node_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        yield Err(Status::invalid_argument(e.to_string()));
+                        continue;
+                    }
+                };
+
+                let lease_ttl_ms = 15_000i64;
+                let lease_expiry =
+                    chrono::Utc::now() + chrono::TimeDelta::try_seconds(15).unwrap();
+
+                if let Err(e) = store.upsert_node(
+                    node_id,
+                    "", // addr not updated via heartbeat
+                    "", // grpc_addr not updated via heartbeat
+                    0,  // capacity not updated via heartbeat
+                    hb.available_bytes,
+                    hb.used_bytes,
+                    lease_expiry,
+                    None,
+                ).await {
+                    yield Err(Status::internal(e.to_string()));
+                    continue;
+                }
+
+                yield Ok(HeartbeatResponse {
+                    lease_ttl_ms,
+                    healthy: true,
+                });
+            }
+        };
+
+        Ok(Response::new(
+            Box::pin(response_stream) as BoxStream<HeartbeatResponse>
+        ))
     }
 
     async fn report_capacity(
         &self,
-        _request: Request<CapacityReport>,
+        request: Request<CapacityReport>,
     ) -> Result<Response<Empty>, Status> {
-        Err(Status::unimplemented("report_capacity not yet implemented"))
+        let req = request.into_inner();
+        let node_id =
+            Uuid::parse_str(&req.node_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let lease_expiry = chrono::Utc::now() + chrono::TimeDelta::try_seconds(15).unwrap();
+
+        self.store
+            .upsert_node(
+                node_id,
+                "",
+                "",
+                req.capacity_bytes,
+                req.available_bytes,
+                req.used_bytes,
+                lease_expiry,
+                None,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(Empty {}))
     }
 
     async fn check(
@@ -78,8 +370,7 @@ impl NodeService for CoordinatorService {
 
 #[tonic::async_trait]
 impl ClusterService for CoordinatorService {
-    type NodeHeartbeatStream =
-        Pin<Box<dyn Stream<Item = Result<HeartbeatResponse, Status>> + Send>>;
+    type NodeHeartbeatStream = BoxStream<HeartbeatResponse>;
 
     async fn create_upload_session(
         &self,
@@ -200,8 +491,8 @@ impl ClusterService for CoordinatorService {
 
     async fn assign_replica(
         &self,
-        _request: Request<Streaming<proto::storage::ReplicateChunkRequest>>,
-    ) -> Result<Response<proto::storage::ReplicateChunkResponse>, Status> {
+        _request: Request<Streaming<ReplicateChunkRequest>>,
+    ) -> Result<Response<ReplicateChunkResponse>, Status> {
         Err(Status::unimplemented("assign_replica not yet implemented"))
     }
 

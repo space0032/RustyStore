@@ -89,6 +89,97 @@ impl MetadataStore {
         Ok(rows)
     }
 
+    /// Expire leases: mark nodes unhealthy whose lease_expiry has passed.
+    /// Returns the node IDs that were newly marked unhealthy.
+    pub async fn expire_leases(&self) -> sqlx::Result<Vec<Uuid>> {
+        let expired: Vec<Uuid> = sqlx::query_as(
+            "SELECT node_id FROM storage_nodes WHERE healthy=true AND lease_expiry < now()",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|(node_id,): (Uuid,)| node_id)
+        .collect();
+
+        for node_id in &expired {
+            self.mark_node_unhealthy(*node_id).await?;
+        }
+
+        Ok(expired)
+    }
+
+    /// Find under-replicated chunks: chunks where durable replica count <
+    /// the file's replication factor. Returns (chunk_id, file_id, required, actual).
+    pub async fn under_replicated_chunks(&self) -> sqlx::Result<Vec<(Uuid, Uuid, i32, i64)>> {
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, i32, i64)>(
+            r#"
+            SELECT c.chunk_id, c.file_id, f.replication_factor,
+                   COALESCE(r.durable_count, 0)
+            FROM chunks c
+            JOIN files f ON c.file_id = f.file_id
+            LEFT JOIN (
+                SELECT chunk_id, COUNT(*) AS durable_count
+                FROM chunk_replicas
+                WHERE durable = true
+                GROUP BY chunk_id
+            ) r ON c.chunk_id = r.chunk_id
+            WHERE COALESCE(r.durable_count, 0) < f.replication_factor
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Atomically claim a pending replication task: mark it in_progress and
+    /// return the task row. Returns None if no pending tasks available.
+    pub async fn claim_replication_task(&self) -> sqlx::Result<Option<ReplicationTaskRow>> {
+        let mut tx = self.pool.begin().await?;
+
+        let row: Option<ReplicationTaskRow> = sqlx::query_as(
+            r#"
+            UPDATE replication_tasks
+            SET status='in_progress', updated_at=now()
+            WHERE task_id = (
+                SELECT task_id FROM replication_tasks
+                WHERE status='pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            "#,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    pub async fn mark_task_failed(&self, task_id: Uuid, attempts: i32) -> sqlx::Result<()> {
+        let status = if attempts >= 5 { "failed" } else { "pending" };
+        sqlx::query(
+            "UPDATE replication_tasks SET status=$1, attempts=$2, updated_at=now() WHERE task_id=$3",
+        )
+        .bind(status)
+        .bind(attempts)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Get the replication factor for a file.
+    pub async fn get_file_replication_factor(&self, file_id: Uuid) -> sqlx::Result<Option<i32>> {
+        let row: Option<(i32,)> =
+            sqlx::query_as("SELECT replication_factor FROM files WHERE file_id=$1")
+                .bind(file_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(rf,)| rf))
+    }
+
     // ---- files -----------------------------------------------------------
 
     pub async fn create_file(
