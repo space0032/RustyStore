@@ -11,8 +11,14 @@
 mod chunk_store;
 mod fs_store;
 
+#[cfg(feature = "s3")]
+mod s3_store;
+
 pub use chunk_store::{CapacityInfo, ChunkEntry, ChunkMeta, ChunkStore, StoreResult};
 pub use fs_store::FsChunkStore;
+
+#[cfg(feature = "s3")]
+pub use s3_store::S3ChunkStore;
 
 #[cfg(test)]
 mod tests {

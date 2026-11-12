@@ -11,6 +11,16 @@ thiserror = "2"
 hex = "0.4"
 async-trait = "0.1"
 tempfile = "3"
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+bytes = "1"
+
+[features]
+# Enable S3-compatible storage backend (MinIO, AWS S3, etc.)
+s3 = [
+    "aws-sdk-s3",
+    "aws-config",
+]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["fs", "rt-multi-thread", "macros"] }
