@@ -8,8 +8,8 @@ use crate::placement::place_replicas;
 #[allow(unused_imports)]
 use crate::types::{ChunkLocationEntry, ChunkManifestEntry, ClusterStats, Manifest, NodeInfoEntry};
 use futures_util::stream::Stream;
-use metadata::MetadataStore;
 use metadata::models::StorageNodeRow;
+use metadata::{MetadataStore, ReplicationTaskRow};
 use proto::storage::{
     CapacityReport, ChunkLocation, ChunkReference, CompleteUploadRequest, CompleteUploadResponse,
     CreateUploadSessionRequest, CreateUploadSessionResponse, Empty, GetChunkPlanRequest,
@@ -21,6 +21,8 @@ use proto::storage::{
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::NodeService,
 };
+#[allow(unused_imports)]
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,17 +81,23 @@ impl Coordinator {
         };
 
         // Recovery scheduler: claims replication tasks and executes them
-        // with bounded concurrency.
+        // with bounded concurrency (max 4 concurrent recoveries).
         let recovery_scheduler = {
             let store = store.clone();
             let interval = Duration::from_secs(5);
+            let max_concurrent = 4usize;
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(interval);
+                let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
                 loop {
                     interval.tick().await;
-                    if let Err(e) = Self::run_recovery_cycle(&store).await {
-                        warn!("recovery scheduler error: {e}");
-                    }
+                    let store = store.clone();
+                    let semaphore = semaphore.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::run_recovery_batch(&store, semaphore).await {
+                            warn!("recovery scheduler batch error: {e}");
+                        }
+                    });
                 }
             })
         };
@@ -163,7 +171,210 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Run one recovery cycle: claim a task and execute it via gRPC replication.
+    /// Run one recovery batch: claim multiple pending tasks and process them
+    /// concurrently with bounded semaphore.
+    async fn run_recovery_batch(
+        store: &Arc<MetadataStore>,
+        semaphore: Arc<tokio::sync::Semaphore>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Claim up to 8 pending tasks.
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            match store.claim_replication_task().await? {
+                Some(task) => tasks.push(task),
+                None => break,
+            }
+        }
+
+        if tasks.is_empty() {
+            return Ok(());
+        }
+
+        // Process all claimed tasks concurrently with bounded semaphore.
+        let mut join_set = tokio::task::JoinSet::new();
+        for task in tasks {
+            let store = store.clone();
+            let permit = semaphore.clone().acquire_owned().await?;
+            join_set.spawn(async move {
+                let _permit = permit;
+                if let Err(e) = Self::execute_recovery_task(&store, task).await {
+                    warn!("recovery task error: {e}");
+                }
+            });
+        }
+
+        // Wait for all tasks to complete.
+        while join_set.join_next().await.is_some() {}
+
+        Ok(())
+    }
+
+    /// Execute a single replication task: transfer chunk from source to target.
+    async fn execute_recovery_task(
+        store: &Arc<MetadataStore>,
+        task: ReplicationTaskRow,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let chunk_id = task.chunk_id;
+        let target_node_id = task.target_node_id;
+        let source_node_id = match task.source_node_id {
+            Some(id) => id,
+            None => {
+                warn!("task {} has no source node, failing", task.task_id);
+                store
+                    .mark_task_failed(task.task_id, task.attempts + 1)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        // Look up node addresses.
+        let nodes = store.all_nodes().await?;
+        let node_map: std::collections::HashMap<Uuid, StorageNodeRow> =
+            nodes.into_iter().map(|n| (n.node_id, n)).collect();
+
+        let source_node = match node_map.get(&source_node_id) {
+            Some(n) => n,
+            None => {
+                warn!(
+                    "source node {} not found, failing task {}",
+                    source_node_id, task.task_id
+                );
+                store
+                    .mark_task_failed(task.task_id, task.attempts + 1)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let target_node = match node_map.get(&target_node_id) {
+            Some(n) => n,
+            None => {
+                warn!(
+                    "target node {} not found, failing task {}",
+                    target_node_id, task.task_id
+                );
+                store
+                    .mark_task_failed(task.task_id, task.attempts + 1)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        // Get chunk metadata (SHA-256, size) from the chunks table.
+        let chunk_row = store.get_chunk(chunk_id).await?;
+        let Some(chunk_row) = chunk_row else {
+            warn!(
+                "chunk {chunk_id} not found in metadata, failing task {}",
+                task.task_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        };
+
+        // Connect to source node and retrieve chunk data via streaming gRPC.
+        let source_addr = format!("http://{}", source_node.grpc_addr);
+        let mut source_client = ChunkServiceClient::connect(source_addr).await?;
+
+        let retrieve_req = RetrieveChunkRequest {
+            chunk_id: chunk_id.to_string(),
+            expected_sha256: chunk_row.sha256_hex.clone(),
+        };
+
+        let mut retrieve_stream = source_client
+            .retrieve_chunk(tonic::Request::new(retrieve_req))
+            .await?
+            .into_inner();
+
+        // Collect chunk data from the source node.
+        let mut chunk_data = Vec::new();
+        while let Some(frame) = retrieve_stream.message().await? {
+            match frame.payload {
+                Some(proto::storage::retrieve_chunk_response::Payload::Meta(_m)) => {}
+                Some(proto::storage::retrieve_chunk_response::Payload::Data(data)) => {
+                    chunk_data.extend_from_slice(&data);
+                }
+                None => {}
+            }
+        }
+
+        // Verify SHA-256 of retrieved data.
+        let actual_hash: String = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&chunk_data);
+            hex::encode(hasher.finalize())
+        };
+        if actual_hash != chunk_row.sha256_hex {
+            warn!(
+                "chunk {chunk_id} hash mismatch from source {}: expected {} got {}",
+                source_node_id, chunk_row.sha256_hex, actual_hash
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        }
+
+        // Connect to target node and push chunk data via streaming gRPC.
+        let target_addr = format!("http://{}", target_node.grpc_addr);
+        let mut target_client = ChunkServiceClient::connect(target_addr).await?;
+
+        let meta = StoreChunkRequest {
+            payload: Some(proto::storage::store_chunk_request::Payload::Meta(
+                ChunkReference {
+                    chunk_id: chunk_id.to_string(),
+                    file_id: String::new(),
+                    chunk_index: 0,
+                    size_bytes: chunk_row.size_bytes,
+                    sha256_hex: chunk_row.sha256_hex.clone(),
+                    replication_factor: 0,
+                },
+            )),
+        };
+
+        let chunk_data_clone = chunk_data.clone();
+        let frame_size = 64 * 1024;
+        let store_stream = async_stream::stream! {
+            yield meta;
+            for chunk in chunk_data_clone.chunks(frame_size) {
+                yield StoreChunkRequest {
+                    payload: Some(proto::storage::store_chunk_request::Payload::Data(chunk.to_vec())),
+                };
+            }
+        };
+
+        let store_response = target_client
+            .store_chunk(tonic::Request::new(store_stream))
+            .await?
+            .into_inner();
+
+        if !store_response.durable {
+            warn!(
+                "target node {} did not confirm durable storage for chunk {}",
+                target_node_id, chunk_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        }
+
+        // Mark replica as durable in metadata.
+        store.insert_replica(chunk_id, target_node_id, true).await?;
+        store.mark_task_done(task.task_id).await?;
+
+        info!(
+            "recovery task {} complete: chunk {} -> node {} (durable confirmed)",
+            task.task_id, chunk_id, target_node_id
+        );
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    /// Legacy single-cycle recovery (kept for backward compatibility).
     async fn run_recovery_cycle(
         store: &Arc<MetadataStore>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
