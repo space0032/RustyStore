@@ -11,12 +11,13 @@ use futures_util::stream::Stream;
 use metadata::MetadataStore;
 use metadata::models::StorageNodeRow;
 use proto::storage::{
-    CapacityReport, ChunkLocation, CompleteUploadRequest, CompleteUploadResponse,
+    CapacityReport, ChunkLocation, ChunkReference, CompleteUploadRequest, CompleteUploadResponse,
     CreateUploadSessionRequest, CreateUploadSessionResponse, Empty, GetChunkPlanRequest,
     GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
     GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, HeartbeatResponse,
     ListNodesRequest, ListNodesResponse, NodeInfo, RegisterRequest, RegisterResponse,
-    ReplicateChunkRequest, ReplicateChunkResponse,
+    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, StoreChunkRequest,
+    chunk_service_client::ChunkServiceClient,
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::NodeService,
 };
@@ -162,7 +163,7 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Run one recovery cycle: claim a task and execute it.
+    /// Run one recovery cycle: claim a task and execute it via gRPC replication.
     async fn run_recovery_cycle(
         store: &Arc<MetadataStore>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -173,15 +174,100 @@ impl Coordinator {
 
         let chunk_id = task.chunk_id;
         let target_node_id = task.target_node_id;
+        let source_node_id = match task.source_node_id {
+            Some(id) => id,
+            None => {
+                warn!("task {} has no source node, failing", task.task_id);
+                store
+                    .mark_task_failed(task.task_id, task.attempts + 1)
+                    .await?;
+                return Ok(());
+            }
+        };
 
-        // Get chunk info for the replication.
-        let replicas = store.replicas_for_chunk(chunk_id).await?;
-        let has_durable_replica = replicas.iter().any(|r| r.durable);
+        // Look up node addresses.
+        let nodes = store.all_nodes().await?;
+        let node_map: std::collections::HashMap<Uuid, StorageNodeRow> =
+            nodes.into_iter().map(|n| (n.node_id, n)).collect();
 
-        if !has_durable_replica {
+        let source_node = match node_map.get(&source_node_id) {
+            Some(n) => n,
+            None => {
+                warn!(
+                    "source node {} not found, failing task {}",
+                    source_node_id, task.task_id
+                );
+                store
+                    .mark_task_failed(task.task_id, task.attempts + 1)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let target_node = match node_map.get(&target_node_id) {
+            Some(n) => n,
+            None => {
+                warn!(
+                    "target node {} not found, failing task {}",
+                    target_node_id, task.task_id
+                );
+                store
+                    .mark_task_failed(task.task_id, task.attempts + 1)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        // Get chunk metadata (SHA-256, size) from the chunks table.
+        let chunk_row = store.get_chunk(chunk_id).await?;
+        let Some(chunk_row) = chunk_row else {
             warn!(
-                "chunk {chunk_id} has no durable replica, skipping task {}",
+                "chunk {chunk_id} not found in metadata, failing task {}",
                 task.task_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        };
+
+        // Connect to source node and retrieve chunk data via streaming gRPC.
+        let source_addr = format!("http://{}", source_node.grpc_addr);
+        let mut source_client = ChunkServiceClient::connect(source_addr).await?;
+
+        let retrieve_req = RetrieveChunkRequest {
+            chunk_id: chunk_id.to_string(),
+            expected_sha256: chunk_row.sha256_hex.clone(),
+        };
+
+        let mut retrieve_stream = source_client
+            .retrieve_chunk(tonic::Request::new(retrieve_req))
+            .await?
+            .into_inner();
+
+        // Collect chunk data from the source node.
+        let mut chunk_data = Vec::new();
+        while let Some(frame) = retrieve_stream.message().await? {
+            match frame.payload {
+                Some(proto::storage::retrieve_chunk_response::Payload::Meta(_m)) => {}
+                Some(proto::storage::retrieve_chunk_response::Payload::Data(data)) => {
+                    chunk_data.extend_from_slice(&data);
+                }
+                None => {}
+            }
+        }
+
+        // Verify SHA-256 of retrieved data.
+        let actual_hash: String = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&chunk_data);
+            hex::encode(hasher.finalize())
+        };
+        if actual_hash != chunk_row.sha256_hex {
+            warn!(
+                "chunk {chunk_id} hash mismatch from source {}: expected {} got {}",
+                source_node_id, chunk_row.sha256_hex, actual_hash
             );
             store
                 .mark_task_failed(task.task_id, task.attempts + 1)
@@ -189,18 +275,56 @@ impl Coordinator {
             return Ok(());
         }
 
-        // TODO: In Phase 5/6, actually perform the gRPC replication transfer
-        // from source to target node. For Phase 4, mark the task as done
-        // after recording the replica intent.
-        // Record the replica placement intent (durable=false until confirmed
-        // by the target node in Phase 5/6).
-        store
-            .insert_replica(chunk_id, target_node_id, false)
-            .await?;
+        // Connect to target node and push chunk data via streaming gRPC.
+        let target_addr = format!("http://{}", target_node.grpc_addr);
+        let mut target_client = ChunkServiceClient::connect(target_addr).await?;
+
+        let meta = StoreChunkRequest {
+            payload: Some(proto::storage::store_chunk_request::Payload::Meta(
+                ChunkReference {
+                    chunk_id: chunk_id.to_string(),
+                    file_id: String::new(),
+                    chunk_index: 0,
+                    size_bytes: chunk_row.size_bytes,
+                    sha256_hex: chunk_row.sha256_hex.clone(),
+                    replication_factor: 0,
+                },
+            )),
+        };
+
+        let chunk_data_clone = chunk_data.clone();
+        let frame_size = 64 * 1024;
+        let store_stream = async_stream::stream! {
+            yield meta;
+            for chunk in chunk_data_clone.chunks(frame_size) {
+                yield StoreChunkRequest {
+                    payload: Some(proto::storage::store_chunk_request::Payload::Data(chunk.to_vec())),
+                };
+            }
+        };
+
+        let store_response = target_client
+            .store_chunk(tonic::Request::new(store_stream))
+            .await?
+            .into_inner();
+
+        if !store_response.durable {
+            warn!(
+                "target node {} did not confirm durable storage for chunk {}",
+                target_node_id, chunk_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        }
+
+        // Mark replica as durable in metadata.
+        store.insert_replica(chunk_id, target_node_id, true).await?;
         store.mark_task_done(task.task_id).await?;
 
         info!(
-            "recovery task {} complete: chunk {} -> node {}",
+            "recovery task {} complete: chunk {} -> node {} (durable confirmed)",
             task.task_id, chunk_id, target_node_id
         );
 

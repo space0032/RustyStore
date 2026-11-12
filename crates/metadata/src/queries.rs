@@ -263,6 +263,15 @@ impl MetadataStore {
         Ok(rows)
     }
 
+    /// Get a single chunk by chunk_id, including its SHA-256 hash.
+    pub async fn get_chunk(&self, chunk_id: Uuid) -> sqlx::Result<Option<ChunkRow>> {
+        let row = sqlx::query_as::<_, ChunkRow>("SELECT * FROM chunks WHERE chunk_id=$1")
+            .bind(chunk_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
     // ---- replicas --------------------------------------------------------
 
     pub async fn insert_replica(
