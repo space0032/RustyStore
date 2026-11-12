@@ -1,4 +1,4 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -7,19 +7,10 @@ use tokio::io::AsyncWriteExt;
 
 use storage_engine::{ChunkStore, FsChunkStore};
 
-async fn bench_store_chunk(store: &FsChunkStore, data: &[u8], expected_hash: &str) {
-    store
-        .store_chunk(black_box("bench-chunk"), data, expected_hash)
-        .await
-        .unwrap();
-}
-
-async fn bench_retrieve_chunk(store: &FsChunkStore) {
-    let entry = store
-        .retrieve_chunk(black_box("bench-chunk"))
-        .await
-        .unwrap();
-    black_box(entry);
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
 fn storage_write_4kb(c: &mut Criterion) {
@@ -29,11 +20,14 @@ fn storage_write_4kb(c: &mut Criterion) {
     rt.block_on(async { store.init().await.unwrap() });
 
     let data = vec![0x42u8; 4 * 1024];
-    let hash = Sha256::digest(&data).to_string();
+    let hash = sha256_hex(&data);
 
     c.bench_function("store_write_4kb", |b| {
-        b.to_async(&rt)
-            .iter(|| bench_store_chunk(&store, &data, &hash));
+        b.iter(|| {
+            rt.block_on(async {
+                store.store_chunk(black_box("bench-chunk"), &data, &hash).await.unwrap()
+            })
+        })
     });
 
     drop(dir);
@@ -46,11 +40,14 @@ fn storage_write_1mb(c: &mut Criterion) {
     rt.block_on(async { store.init().await.unwrap() });
 
     let data = vec![0x42u8; 1_048_576];
-    let hash = Sha256::digest(&data).to_string();
+    let hash = sha256_hex(&data);
 
     c.bench_function("store_write_1mb", |b| {
-        b.to_async(&rt)
-            .iter(|| bench_store_chunk(&store, &data, &hash));
+        b.iter(|| {
+            rt.block_on(async {
+                store.store_chunk(black_box("bench-chunk"), &data, &hash).await.unwrap()
+            })
+        })
     });
 
     drop(dir);
@@ -63,11 +60,14 @@ fn storage_write_4mb(c: &mut Criterion) {
     rt.block_on(async { store.init().await.unwrap() });
 
     let data = vec![0x42u8; 4 * 1024 * 1024];
-    let hash = Sha256::digest(&data).to_string();
+    let hash = sha256_hex(&data);
 
     c.bench_function("store_write_4mb", |b| {
-        b.to_async(&rt)
-            .iter(|| bench_store_chunk(&store, &data, &hash));
+        b.iter(|| {
+            rt.block_on(async {
+                store.store_chunk(black_box("bench-chunk"), &data, &hash).await.unwrap()
+            })
+        })
     });
 
     drop(dir);
@@ -80,16 +80,18 @@ fn storage_read_4mb(c: &mut Criterion) {
     rt.block_on(async { store.init().await.unwrap() });
 
     let data = vec![0x42u8; 4 * 1024 * 1024];
-    let hash = Sha256::digest(&data).to_string();
+    let hash = sha256_hex(&data);
     rt.block_on(async {
-        store
-            .store_chunk("bench-read-chunk", &data, &hash)
-            .await
-            .unwrap()
+        store.store_chunk("bench-read-chunk", &data, &hash).await.unwrap()
     });
 
     c.bench_function("store_read_4mb", |b| {
-        b.to_async(&rt).iter(|| bench_retrieve_chunk(&store));
+        b.iter(|| {
+            rt.block_on(async {
+                let entry = store.retrieve_chunk("bench-read-chunk").await.unwrap();
+                black_box(entry);
+            })
+        })
     });
 
     drop(dir);
@@ -102,22 +104,18 @@ fn storage_delete(c: &mut Criterion) {
     rt.block_on(async { store.init().await.unwrap() });
 
     let data = vec![0x42u8; 4 * 1024 * 1024];
-    let hash = Sha256::digest(&data).to_string();
+    let hash = sha256_hex(&data);
     rt.block_on(async {
-        store
-            .store_chunk("bench-delete-chunk", &data, &hash)
-            .await
-            .unwrap()
+        store.store_chunk("bench-delete-chunk", &data, &hash).await.unwrap()
     });
 
     c.bench_function("store_delete_4mb", |b| {
-        b.to_async(&rt).iter(|| {
-            let store = store.clone();
-            async move {
+        b.iter(|| {
+            rt.block_on(async {
                 let _ = store.delete_chunk(black_box("bench-delete-chunk")).await;
                 let _ = store.store_chunk("bench-delete-chunk", &data, &hash).await;
-            }
-        });
+            })
+        })
     });
 
     drop(dir);

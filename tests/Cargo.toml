@@ -1,0 +1,18 @@
+[package]
+name = "rustystore_integration_tests"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common = { path = "../crates/common" }
+coordinator = { path = "../crates/coordinator" }
+metadata = { path = "../crates/metadata" }
+storage-engine = { path = "../crates/storage-engine" }
+sha2 = "0.10"
+chrono = "0.4"
+hex = "0.4"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["full", "macros"] }
+
+[dev-dependencies]

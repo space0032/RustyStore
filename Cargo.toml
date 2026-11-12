@@ -11,6 +11,7 @@ members = [
   "crates/replication",
   "crates/observability",
   "benchmarks",
+  "tests",
 ]
 
 [workspace.package]
