@@ -1,9 +1,27 @@
-//! Storage node server runner (stub).
+//! Storage node server runner.
+//! Wires the Tonic gRPC services to a TCP listener.
+
+use crate::StorageNode;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 pub struct StorageNodeServer;
 
 impl StorageNodeServer {
-    pub async fn run(_addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
-        Err("not implemented in Phase 1 stub".into())
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn run(
+        addr: SocketAddr,
+        node: Arc<StorageNode>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::service::StorageNodeServer::run(addr, node).await
+    }
+}
+
+impl Default for StorageNodeServer {
+    fn default() -> Self {
+        Self::new()
     }
 }
