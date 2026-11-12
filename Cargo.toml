@@ -10,6 +10,7 @@ members = [
   "crates/gateway",
   "crates/replication",
   "crates/observability",
+  "benchmarks",
 ]
 
 [workspace.package]
