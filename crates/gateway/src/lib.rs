@@ -12,10 +12,12 @@ mod auth;
 mod chunk_utils;
 mod error;
 mod handlers;
+mod rate_limit;
 mod routes;
 
 pub use app::AppState;
 pub use auth::{AuthConfig, auth_middleware};
+pub use rate_limit::{RateLimitConfig, RateLimiter, rate_limit_middleware};
 
 use axum::Router;
 use std::net::SocketAddr;
@@ -34,8 +36,10 @@ pub async fn run(
     // Register Prometheus collectors (idempotent).
     observability::register_metrics()?;
 
-    // Build auth config from environment.
+    // Build auth + rate-limit configuration from the environment.
     let auth_config = Arc::new(AuthConfig::from_env());
+    let rate_config = RateLimitConfig::from_env();
+    let rate_limiter = Arc::new(RateLimiter::new(rate_config.rps, rate_config.burst));
 
     let app = Router::new()
         .merge(routes::routes(Arc::clone(&state)))
@@ -46,6 +50,10 @@ pub async fn run(
                 .layer(axum::middleware::from_fn_with_state(
                     auth_config.clone(),
                     auth_middleware,
+                ))
+                .layer(axum::middleware::from_fn_with_state(
+                    rate_limiter,
+                    rate_limit_middleware,
                 )),
         );
 
@@ -56,6 +64,14 @@ pub async fn run(
             "enabled"
         } else {
             "disabled"
+        }
+    );
+    info!(
+        "rate limit: {}",
+        if rate_config.is_enabled() {
+            format!("{} rps, burst {}", rate_config.rps, rate_config.burst)
+        } else {
+            "disabled".to_string()
         }
     );
 
@@ -69,10 +85,13 @@ pub async fn run(
         info!("received shutdown signal, shutting down gracefully");
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(graceful)
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(graceful)
+    .await
+    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     Ok(())
 }
