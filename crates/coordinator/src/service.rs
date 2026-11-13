@@ -642,15 +642,11 @@ impl NodeService for CoordinatorService {
                 let lease_expiry =
                     chrono::Utc::now() + chrono::TimeDelta::try_seconds(15).unwrap();
 
-                if let Err(e) = store.upsert_node(
+                if let Err(e) = store.touch_node(
                     node_id,
-                    "", // addr not updated via heartbeat
-                    "", // grpc_addr not updated via heartbeat
-                    0,  // capacity not updated via heartbeat
                     hb.available_bytes,
                     hb.used_bytes,
                     lease_expiry,
-                    None,
                 ).await {
                     yield Err(Status::internal(e.to_string()));
                     continue;
@@ -679,15 +675,12 @@ impl NodeService for CoordinatorService {
         let lease_expiry = chrono::Utc::now() + chrono::TimeDelta::try_seconds(15).unwrap();
 
         self.store
-            .upsert_node(
+            .update_node_capacity(
                 node_id,
-                "",
-                "",
                 req.capacity_bytes,
                 req.available_bytes,
                 req.used_bytes,
                 lease_expiry,
-                None,
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;

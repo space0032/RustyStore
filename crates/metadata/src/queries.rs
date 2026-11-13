@@ -5,8 +5,12 @@
 //! `committed` inside the finalizing transaction.
 
 use crate::models::*;
-use sqlx::postgres::PgPool;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use uuid::Uuid;
+
+/// Embedded initial schema. Idempotent (`CREATE ... IF NOT EXISTS`) so it can
+/// be applied safely on every coordinator startup.
+pub const SCHEMA_SQL: &str = include_str!("../../../migrations/init/schema.sql");
 
 /// Metadata repository handle.
 pub struct MetadataStore {
@@ -16,6 +20,16 @@ pub struct MetadataStore {
 impl MetadataStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Connect to PostgreSQL and apply the initial schema (idempotent).
+    pub async fn connect_and_migrate(database_url: &str) -> Result<Self, sqlx::Error> {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(database_url)
+            .await?;
+        sqlx::raw_sql(SCHEMA_SQL).execute(&pool).await?;
+        Ok(Self::new(pool))
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -71,6 +85,60 @@ impl MetadataStore {
             .bind(node_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Refresh a node's lease and capacity counters without clobbering its
+    /// address/capacity metadata (used by heartbeats).
+    pub async fn touch_node(
+        &self,
+        node_id: Uuid,
+        available_bytes: i64,
+        used_bytes: i64,
+        lease_expiry: chrono::DateTime<chrono::Utc>,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE storage_nodes
+            SET available_bytes=$2, used_bytes=$3, lease_expiry=$4,
+                last_seen=now(), healthy=true, updated_at=now()
+            WHERE node_id=$1
+            "#,
+        )
+        .bind(node_id)
+        .bind(available_bytes)
+        .bind(used_bytes)
+        .bind(lease_expiry)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Update a node's capacity counters and lease without clobbering its
+    /// address metadata (used by explicit capacity reports).
+    pub async fn update_node_capacity(
+        &self,
+        node_id: Uuid,
+        capacity_bytes: i64,
+        available_bytes: i64,
+        used_bytes: i64,
+        lease_expiry: chrono::DateTime<chrono::Utc>,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE storage_nodes
+            SET capacity_bytes=$2, available_bytes=$3, used_bytes=$4,
+                lease_expiry=$5, last_seen=now(), healthy=true, updated_at=now()
+            WHERE node_id=$1
+            "#,
+        )
+        .bind(node_id)
+        .bind(capacity_bytes)
+        .bind(available_bytes)
+        .bind(used_bytes)
+        .bind(lease_expiry)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

@@ -12,7 +12,7 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- storage nodes
-CREATE TABLE storage_nodes (
+CREATE TABLE IF NOT EXISTS storage_nodes (
   node_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   addr           TEXT NOT NULL,
   grpc_addr      TEXT NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE storage_nodes (
 );
 
 -- files (manifest)
-CREATE TABLE files (
+CREATE TABLE IF NOT EXISTS files (
   file_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   filename          TEXT NOT NULL,
   total_size        BIGINT NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE files (
 );
 
 -- chunks (content-addressed)
-CREATE TABLE chunks (
+CREATE TABLE IF NOT EXISTS chunks (
   chunk_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   sha256_hex  CHAR(64) NOT NULL,
   size_bytes  BIGINT NOT NULL,
@@ -50,11 +50,11 @@ CREATE TABLE chunks (
   UNIQUE (file_id, chunk_index)
 );
 
-CREATE INDEX idx_chunks_sha256 ON chunks(sha256_hex);
-CREATE INDEX idx_chunks_file ON chunks(file_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_sha256 ON chunks(sha256_hex);
+CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
 
 -- chunk replicas (placement)
-CREATE TABLE chunk_replicas (
+CREATE TABLE IF NOT EXISTS chunk_replicas (
   replica_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   chunk_id   UUID NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
   node_id    UUID NOT NULL REFERENCES storage_nodes(node_id) ON DELETE CASCADE,
@@ -63,12 +63,12 @@ CREATE TABLE chunk_replicas (
   UNIQUE (chunk_id, node_id)
 );
 
-CREATE INDEX idx_chunk_replicas_node ON chunk_replicas(node_id);
-CREATE INDEX idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
-CREATE INDEX idx_chunk_replicas_durable ON chunk_replicas(durable);
+CREATE INDEX IF NOT EXISTS idx_chunk_replicas_node ON chunk_replicas(node_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_replicas_durable ON chunk_replicas(durable);
 
 -- upload sessions (for abort / orphan cleanup)
-CREATE TABLE upload_sessions (
+CREATE TABLE IF NOT EXISTS upload_sessions (
   upload_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   file_id      UUID REFERENCES files(file_id) ON DELETE CASCADE,
   status       TEXT NOT NULL DEFAULT 'pending', -- pending, committed, aborted
@@ -77,7 +77,7 @@ CREATE TABLE upload_sessions (
 );
 
 -- replication tasks (recovery scheduling / work queue)
-CREATE TABLE replication_tasks (
+CREATE TABLE IF NOT EXISTS replication_tasks (
   task_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   chunk_id       UUID NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
   source_node_id UUID REFERENCES storage_nodes(node_id),
@@ -89,6 +89,6 @@ CREATE TABLE replication_tasks (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_replication_tasks_status ON replication_tasks(status);
-CREATE INDEX idx_replication_tasks_target ON replication_tasks(target_node_id);
-CREATE INDEX idx_replication_tasks_chunk ON replication_tasks(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_replication_tasks_status ON replication_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_replication_tasks_target ON replication_tasks(target_node_id);
+CREATE INDEX IF NOT EXISTS idx_replication_tasks_chunk ON replication_tasks(chunk_id);

@@ -8,6 +8,7 @@ common = { path = "../common" }
 proto = { path = "../proto" }
 coordinator = { path = "../coordinator" }
 storage-engine = { path = "../storage-engine" }
+observability = { path = "../observability" }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"

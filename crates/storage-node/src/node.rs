@@ -75,6 +75,16 @@ impl StorageNode {
         *self.inner.node_id.read().unwrap()
     }
 
+    /// Adopt the node ID assigned by the coordinator during registration.
+    pub fn set_node_id(&self, node_id: Uuid) {
+        *self.inner.node_id.write().unwrap() = Some(node_id);
+    }
+
+    /// Query the current disk capacity of the storage volume.
+    pub async fn capacity(&self) -> StoreResult<storage_engine::CapacityInfo> {
+        self.inner.store.get_capacity().await
+    }
+
     /// Store a chunk atomically (temp file -> fsync -> rename).
     /// Verifies SHA-256 before exposing the chunk to readers.
     pub async fn store_chunk(
