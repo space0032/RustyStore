@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-12.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-13.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -136,8 +136,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 10 | Production Hardening | Complete | `crates/gateway/src/auth.rs`, graceful shutdown, trace/timeout |
 | 11 | Runnable Services & Deployment | Complete | `crates/{coordinator,storage-node,gateway}/src/main.rs`, Dockerfiles |
 | 12 | Metrics Endpoint & Counter Wiring | Complete | `observability`, `/metrics`, gateway counters, coordinator gauges |
+| 13 | Per-IP Rate Limiting | Complete | `gateway::rate_limit`, token bucket middleware, `RATE_LIMIT_*` |
 
-Phase documentation: `PHASE-1.md` through `PHASE-12.md`
+Phase documentation: `PHASE-1.md` through `PHASE-13.md`
 
 ---
 
@@ -191,7 +192,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (17 unit + 5 integration = 22 total, all passing)
+### Unit Tests (19 unit + 5 integration = 24 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -210,10 +211,12 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 4. `test_place_replicas_respects_disk_space` — skip nodes with insufficient disk
 5. `test_place_replicas_excludes_specified_nodes` — respect exclude list
 
-**gateway** (3 tests):
+**gateway** (5 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
+4. `disabled_limiter_allows_all` — rate limiting off is a pass-through
+5. `burst_is_enforced_per_ip` — token bucket exhausts per IP and isolates clients
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
@@ -283,7 +286,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 3. **No source node failover** during recovery — if source dies mid-transfer, task fails and retries
 4. **No bandwidth throttling** for replication traffic
 5. **No priority queue** — all recovery tasks equal priority (FIFO)
-6. **Rate limiting deferred** — `tower-http` API mismatch in current version
+6. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
 8. **Coordinator metrics not served over HTTP** — gauges are registered in the coordinator process; only the gateway exposes `/metrics`
 
@@ -306,7 +309,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Graceful shutdown** — Ctrl+C handling with in-flight request completion
 - **Observability** — tracing (JSON), Prometheus metrics, request tracing
 - **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges
-- **22 passing tests** across storage engine, coordinator, gateway, observability, and integration
+- **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
+- **24 passing tests** across storage engine, coordinator, gateway, observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
