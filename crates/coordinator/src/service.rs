@@ -59,6 +59,9 @@ impl Coordinator {
                     if let Err(e) = store.expire_leases().await {
                         warn!("lease expiry monitor error: {e}");
                     }
+                    if let Ok(nodes) = store.healthy_nodes().await {
+                        observability::ACTIVE_NODES.set(nodes.len() as i64);
+                    }
                 }
             })
         };
@@ -116,6 +119,7 @@ impl Coordinator {
         _default_rf: i32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let under_replicated = store.under_replicated_chunks().await?;
+        observability::UNDER_REPLICATED_CHUNKS.set(under_replicated.len() as i64);
 
         for (chunk_id, _file_id, _required, _actual) in under_replicated {
             // Find a healthy source node that has a durable replica of this chunk.

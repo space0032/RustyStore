@@ -87,6 +87,7 @@ async fn fetch_and_stream_chunks(
                 .await
             {
                 Ok(data) => {
+                    observability::DOWNLOADED_BYTES.inc_by(data.len() as u64);
                     if tx.send(Ok(bytes::Bytes::from(data))).await.is_err() {
                         return Ok(()); // receiver dropped
                     }

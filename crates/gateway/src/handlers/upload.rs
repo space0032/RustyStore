@@ -32,6 +32,20 @@ fn replication_factor() -> i32 {
 }
 
 pub async fn upload_file(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    req: Request<Body>,
+) -> Result<Json<UploadResponse>, crate::error::GatewayError> {
+    match upload_file_inner(state, headers, req).await {
+        Ok(response) => Ok(response),
+        Err(e) => {
+            observability::UPLOAD_FAILURES.inc();
+            Err(e)
+        }
+    }
+}
+
+async fn upload_file_inner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     req: Request<Body>,
@@ -114,6 +128,8 @@ pub async fn upload_file(
         )
         .await
         .map_err(|e| crate::error::GatewayError::Internal(format!("replica storage error: {e}")))?;
+
+        observability::UPLOADED_BYTES.inc_by(chunk.data.len() as u64);
 
         chunk_manifests.push(coordinator::types::ChunkManifestEntry {
             chunk_id,

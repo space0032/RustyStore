@@ -24,6 +24,7 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     observability::init()?;
+    observability::register_metrics()?;
 
     let database_url = env_or(
         "DATABASE_URL",

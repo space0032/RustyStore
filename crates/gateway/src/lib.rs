@@ -31,6 +31,9 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState::new(&coordinator_addr));
 
+    // Register Prometheus collectors (idempotent).
+    observability::register_metrics()?;
+
     // Build auth config from environment.
     let auth_config = Arc::new(AuthConfig::from_env());
 

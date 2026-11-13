@@ -57,10 +57,44 @@ pub fn prometheus_metrics() -> String {
 }
 
 pub fn register_metrics() -> Result<(), Box<dyn std::error::Error>> {
-    REGISTRY.register(Box::new(UPLOADED_BYTES.clone()))?;
-    REGISTRY.register(Box::new(DOWNLOADED_BYTES.clone()))?;
-    REGISTRY.register(Box::new(UPLOAD_FAILURES.clone()))?;
-    REGISTRY.register(Box::new(ACTIVE_NODES.clone()))?;
-    REGISTRY.register(Box::new(UNDER_REPLICATED_CHUNKS.clone()))?;
+    register(UPLOADED_BYTES.clone())?;
+    register(DOWNLOADED_BYTES.clone())?;
+    register(UPLOAD_FAILURES.clone())?;
+    register(ACTIVE_NODES.clone())?;
+    register(UNDER_REPLICATED_CHUNKS.clone())?;
     Ok(())
+}
+
+/// Register a collector, treating re-registration as success so that
+/// `register_metrics()` is idempotent (safe to call from multiple entry points
+/// or tests in the same process).
+fn register<C>(collector: C) -> Result<(), prometheus::Error>
+where
+    C: prometheus::core::Collector + 'static,
+{
+    match REGISTRY.register(Box::new(collector)) {
+        Ok(()) => Ok(()),
+        Err(prometheus::Error::AlreadyReg) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_render_contains_counters_and_is_idempotent() {
+        register_metrics().unwrap();
+        register_metrics().unwrap();
+
+        UPLOADED_BYTES.inc();
+        DOWNLOADED_BYTES.inc();
+        ACTIVE_NODES.set(1);
+
+        let text = prometheus_metrics();
+        assert!(text.contains("rustystore_uploaded_bytes_total"), "{text}");
+        assert!(text.contains("rustystore_downloaded_bytes_total"), "{text}");
+        assert!(text.contains("rustystore_active_storage_nodes"), "{text}");
+    }
 }

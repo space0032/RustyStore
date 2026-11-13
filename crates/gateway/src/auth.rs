@@ -62,6 +62,12 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
+    // Health and metrics endpoints are always public (used by probes/scrapers).
+    let path = request.uri().path();
+    if path == "/api/v1/health" || path == "/metrics" {
+        return Ok(next.run(request).await);
+    }
+
     // Extract the Authorization header.
     let auth_header = request
         .headers()

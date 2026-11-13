@@ -11,8 +11,9 @@ use crate::handlers::{cluster, download, files, health, upload};
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
-        // Health
+        // Health & metrics
         .route("/api/v1/health", get(health::health))
+        .route("/metrics", get(health::metrics))
         // File operations
         .route("/api/v1/files", post(upload::upload_file))
         .route(
