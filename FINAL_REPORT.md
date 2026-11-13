@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-16.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-17.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -140,8 +140,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 14 | Coordinator HTTP Metrics/Health | Complete | `coordinator::http`, `COORDINATOR_HTTP_ADDR`, `/metrics`, `/health` |
 | 15 | Structured Errors & Request IDs | Complete | `gateway::error` JSON, `gateway::request_id`, `x-request-id` |
 | 16 | Upload Size Limits | Complete | `MAX_UPLOAD_BYTES`, early + streaming enforcement, `413` |
+| 17 | Readiness Probes | Complete | `/api/v1/ready`, coordinator `/ready` with DB ping |
 
-Phase documentation: `PHASE-1.md` through `PHASE-16.md`
+Phase documentation: `PHASE-1.md` through `PHASE-17.md`
 
 ---
 
@@ -195,7 +196,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (33 unit + 5 integration = 38 total, all passing)
+### Unit Tests (37 unit + 5 integration = 42 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -207,7 +208,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 7. `test_get_capacity` — disk capacity query
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 
-**coordinator** (8 tests):
+**coordinator** (10 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -215,9 +216,11 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 5. `test_place_replicas_excludes_specified_nodes` — respect exclude list
 6. `metrics_render_prometheus_text` — coordinator `/metrics` exposes gauges
 7. `health_returns_ok` — coordinator `/health` returns 200 JSON
-8. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
+8. `ready_reports_200_when_dependencies_ok` — readiness 200 when DB reachable
+9. `ready_reports_503_when_dependencies_down` — readiness 503 when DB down
+10. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
 
-**gateway** (16 tests):
+**gateway** (18 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
@@ -234,6 +237,8 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 14. `zero_limit_is_unlimited` — `MAX_UPLOAD_BYTES=0` disables enforcement
 15. `at_or_below_limit_is_allowed` — uploads within limit accepted
 16. `above_limit_is_rejected` — uploads over limit rejected
+17. `ready_response_shape` — readiness JSON shape (ready / not_ready)
+18. `ready_is_503_when_coordinator_unreachable` — readiness fails closed
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
@@ -330,7 +335,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Both services expose Prometheus metrics** — gateway on `/metrics`, coordinator on a dedicated HTTP port
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
-- **38 passing tests** across storage engine, coordinator, gateway, observability, and integration
+- **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator probes) for orchestrators
+- **42 passing tests** across storage engine, coordinator, gateway, observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---

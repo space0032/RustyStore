@@ -49,6 +49,40 @@ paths:
                     type: string
                     example: "gateway"
 
+  /api/v1/ready:
+    get:
+      tags: [health]
+      summary: Readiness check
+      description: |
+        Reports whether the gateway can serve traffic: it probes the
+        coordinator and returns `503` when unreachable. Always public.
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: Ready to serve traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ready"
+        '503':
+          description: Not ready (dependency unavailable)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "not_ready"
+                  reason:
+                    type: string
+                    example: "coordinator unavailable"
+
   /metrics:
     get:
       tags: [health]

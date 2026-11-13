@@ -84,8 +84,8 @@ Service binaries:
 
 ### Observability
 
-- Gateway: `GET /metrics` and `GET /api/v1/health` on `GATEWAY_ADDR`
-- Coordinator: `GET /metrics` and `GET /health` on `COORDINATOR_HTTP_ADDR` (default `0.0.0.0:8081`)
+- Gateway: `GET /metrics`, `GET /api/v1/health` (liveness), `GET /api/v1/ready` (coordinator probe) on `GATEWAY_ADDR`
+- Coordinator: `GET /metrics`, `GET /health` (liveness), `GET /ready` (DB probe) on `COORDINATOR_HTTP_ADDR` (default `0.0.0.0:8081`)
 
 Both `/metrics` endpoints expose Prometheus text format. Gateway metrics cover
 upload/download bytes and failures; coordinator metrics cover active nodes and
