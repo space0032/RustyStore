@@ -5,10 +5,8 @@
 //! in memory at a time.
 
 use common::error::RustyStoreError;
-use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncRead;
-use tokio_util::codec::{BytesCodec, FramedRead};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// A generated chunk with its content hash.
 #[derive(Debug, Clone)]
@@ -22,7 +20,7 @@ pub struct GeneratedChunk {
 /// bytes each. Each chunk's SHA-256 is computed incrementally during the
 /// split.
 pub struct ChunkGenerator<R> {
-    reader: FramedRead<R, BytesCodec>,
+    reader: R,
     chunk_size: usize,
     index: u64,
     eof: bool,
@@ -31,7 +29,7 @@ pub struct ChunkGenerator<R> {
 impl<R: AsyncRead + Unpin> ChunkGenerator<R> {
     pub fn new(reader: R, chunk_size: usize) -> Self {
         Self {
-            reader: FramedRead::new(reader, BytesCodec::new()),
+            reader,
             chunk_size,
             index: 0,
             eof: false,
@@ -41,39 +39,38 @@ impl<R: AsyncRead + Unpin> ChunkGenerator<R> {
     /// Read the next bounded chunk, computing its SHA-256.
     /// Returns `None` when the stream is exhausted.
     pub async fn next_chunk(&mut self) -> Result<Option<GeneratedChunk>, RustyStoreError> {
-        if self.eof {
-            return Ok(None);
-        }
-
-        let mut hasher = Sha256::new();
-        let mut buf = Vec::with_capacity(self.chunk_size);
-        let mut remaining = self.chunk_size;
-
-        while remaining > 0 {
-            let bytes = match self.reader.next().await {
-                Some(Ok(b)) => b,
-                Some(Err(e)) => return Err(RustyStoreError::Io(e)),
-                None => {
-                    self.eof = true;
-                    break;
-                }
-            };
-
-            let take = bytes.len().min(remaining);
-            buf.extend_from_slice(&bytes[..take]);
-            hasher.update(&bytes[..take]);
-            remaining -= take;
-
-            if buf.len() >= self.chunk_size {
-                break;
-            }
-        }
-
-        if buf.is_empty() {
+        if self.eof || self.chunk_size == 0 {
             self.eof = true;
             return Ok(None);
         }
 
+        let mut buf = vec![0u8; self.chunk_size];
+        let mut filled = 0;
+
+        while filled < self.chunk_size {
+            let n = self
+                .reader
+                .read(&mut buf[filled..])
+                .await
+                .map_err(RustyStoreError::Io)?;
+
+            if n == 0 {
+                self.eof = true;
+                break;
+            }
+
+            filled += n;
+        }
+
+        if filled == 0 {
+            self.eof = true;
+            return Ok(None);
+        }
+
+        buf.truncate(filled);
+
+        let mut hasher = Sha256::new();
+        hasher.update(&buf);
         let sha256_hex = hex::encode(hasher.finalize());
         let chunk = GeneratedChunk {
             data: buf,
@@ -88,7 +85,7 @@ impl<R: AsyncRead + Unpin> ChunkGenerator<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::Cursor;
+    use std::io::Cursor;
 
     #[tokio::test]
     async fn test_chunk_generator_splits_correctly() {
