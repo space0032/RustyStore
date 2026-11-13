@@ -1,9 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rand::Rng;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::io::AsyncWriteExt;
 
 use storage_engine::{ChunkStore, FsChunkStore};
 
@@ -25,7 +22,10 @@ fn storage_write_4kb(c: &mut Criterion) {
     c.bench_function("store_write_4kb", |b| {
         b.iter(|| {
             rt.block_on(async {
-                store.store_chunk(black_box("bench-chunk"), &data, &hash).await.unwrap()
+                store
+                    .store_chunk(black_box("bench-chunk"), &data, &hash)
+                    .await
+                    .unwrap()
             })
         })
     });
@@ -45,7 +45,10 @@ fn storage_write_1mb(c: &mut Criterion) {
     c.bench_function("store_write_1mb", |b| {
         b.iter(|| {
             rt.block_on(async {
-                store.store_chunk(black_box("bench-chunk"), &data, &hash).await.unwrap()
+                store
+                    .store_chunk(black_box("bench-chunk"), &data, &hash)
+                    .await
+                    .unwrap()
             })
         })
     });
@@ -65,7 +68,10 @@ fn storage_write_4mb(c: &mut Criterion) {
     c.bench_function("store_write_4mb", |b| {
         b.iter(|| {
             rt.block_on(async {
-                store.store_chunk(black_box("bench-chunk"), &data, &hash).await.unwrap()
+                store
+                    .store_chunk(black_box("bench-chunk"), &data, &hash)
+                    .await
+                    .unwrap()
             })
         })
     });
@@ -82,7 +88,10 @@ fn storage_read_4mb(c: &mut Criterion) {
     let data = vec![0x42u8; 4 * 1024 * 1024];
     let hash = sha256_hex(&data);
     rt.block_on(async {
-        store.store_chunk("bench-read-chunk", &data, &hash).await.unwrap()
+        store
+            .store_chunk("bench-read-chunk", &data, &hash)
+            .await
+            .unwrap()
     });
 
     c.bench_function("store_read_4mb", |b| {
@@ -106,7 +115,10 @@ fn storage_delete(c: &mut Criterion) {
     let data = vec![0x42u8; 4 * 1024 * 1024];
     let hash = sha256_hex(&data);
     rt.block_on(async {
-        store.store_chunk("bench-delete-chunk", &data, &hash).await.unwrap()
+        store
+            .store_chunk("bench-delete-chunk", &data, &hash)
+            .await
+            .unwrap()
     });
 
     c.bench_function("store_delete_4mb", |b| {
