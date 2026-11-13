@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-15.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-16.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -139,8 +139,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 13 | Per-IP Rate Limiting | Complete | `gateway::rate_limit`, token bucket middleware, `RATE_LIMIT_*` |
 | 14 | Coordinator HTTP Metrics/Health | Complete | `coordinator::http`, `COORDINATOR_HTTP_ADDR`, `/metrics`, `/health` |
 | 15 | Structured Errors & Request IDs | Complete | `gateway::error` JSON, `gateway::request_id`, `x-request-id` |
+| 16 | Upload Size Limits | Complete | `MAX_UPLOAD_BYTES`, early + streaming enforcement, `413` |
 
-Phase documentation: `PHASE-1.md` through `PHASE-15.md`
+Phase documentation: `PHASE-1.md` through `PHASE-16.md`
 
 ---
 
@@ -194,7 +195,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (29 unit + 5 integration = 34 total, all passing)
+### Unit Tests (33 unit + 5 integration = 38 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -216,7 +217,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 7. `health_returns_ok` — coordinator `/health` returns 200 JSON
 8. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
 
-**gateway** (12 tests):
+**gateway** (16 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
@@ -225,10 +226,14 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 6. `not_found_is_404_json` — structured 404 error body
 7. `invalid_argument_is_400_json` — structured 400 with detail
 8. `internal_is_500_and_grpc_is_502` — 500/502 mapping and codes
-9. `generates_uuid_when_absent` — request id generated
-10. `preserves_incoming_id` — client-supplied id reused
-11. `ignores_empty_incoming_id` — empty id replaced
-12. `echoes_request_id_on_response` — middleware echoes id on all responses
+9. `payload_too_large_is_413_json` — 413 mapping and code
+10. `generates_uuid_when_absent` — request id generated
+11. `preserves_incoming_id` — client-supplied id reused
+12. `ignores_empty_incoming_id` — empty id replaced
+13. `echoes_request_id_on_response` — middleware echoes id on all responses
+14. `zero_limit_is_unlimited` — `MAX_UPLOAD_BYTES=0` disables enforcement
+15. `at_or_below_limit_is_allowed` — uploads within limit accepted
+16. `above_limit_is_rejected` — uploads over limit rejected
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
@@ -300,6 +305,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 5. **No priority queue** — all recovery tasks equal priority (FIFO)
 6. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
+8. **Rejected in-flight uploads leave orphaned chunks** — chunks stored before the size limit is hit are not reclaimed by a sweeper
 
 ---
 
@@ -323,7 +329,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
 - **Both services expose Prometheus metrics** — gateway on `/metrics`, coordinator on a dedicated HTTP port
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
-- **34 passing tests** across storage engine, coordinator, gateway, observability, and integration
+- **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
+- **38 passing tests** across storage engine, coordinator, gateway, observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---

@@ -311,7 +311,7 @@ components:
             code:
               type: string
               description: Stable machine-readable error code
-              enum: [not_found, invalid_argument, internal, upstream_error]
+              enum: [not_found, invalid_argument, payload_too_large, internal, upstream_error]
               example: not_found
             message:
               type: string
