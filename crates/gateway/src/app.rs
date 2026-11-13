@@ -7,14 +7,27 @@ use coordinator::CoordinatorClient;
 pub struct AppState {
     pub coordinator_addr: String,
     pub coordinator_client: Mutex<Option<CoordinatorClient>>,
+    /// Maximum accepted upload size in bytes; `0` means unlimited.
+    pub max_upload_bytes: u64,
 }
 
 impl AppState {
     pub fn new(coordinator_addr: &str) -> Self {
+        let max_upload_bytes = std::env::var("MAX_UPLOAD_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         Self {
             coordinator_addr: coordinator_addr.to_string(),
             coordinator_client: Mutex::new(None),
+            max_upload_bytes,
         }
+    }
+
+    /// Override the upload size limit (used in tests and custom wiring).
+    pub fn with_max_upload_bytes(mut self, max_upload_bytes: u64) -> Self {
+        self.max_upload_bytes = max_upload_bytes;
+        self
     }
 
     pub async fn coord_client(&self) -> Result<CoordinatorClient, crate::error::GatewayError> {
@@ -34,6 +47,7 @@ impl Clone for AppState {
         Self {
             coordinator_addr: self.coordinator_addr.clone(),
             coordinator_client: Mutex::new(None),
+            max_upload_bytes: self.max_upload_bytes,
         }
     }
 }

@@ -31,6 +31,12 @@ fn replication_factor() -> i32 {
     3
 }
 
+/// Returns `true` when `received` exceeds a non-zero limit. A limit of `0`
+/// disables enforcement.
+fn exceeds_limit(received: u64, max: u64) -> bool {
+    max != 0 && received > max
+}
+
 pub async fn upload_file(
     state: State<Arc<AppState>>,
     headers: HeaderMap,
@@ -61,6 +67,14 @@ async fn upload_file_inner(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+
+    // Reject clearly-oversized uploads before doing any work.
+    if exceeds_limit(total_size.max(0) as u64, state.max_upload_bytes) {
+        return Err(crate::error::GatewayError::PayloadTooLarge(format!(
+            "content-length {total_size} exceeds limit of {} bytes",
+            state.max_upload_bytes
+        )));
+    }
 
     let chunk_size = DEFAULT_CHUNK_SIZE as usize;
     let rf = replication_factor();
@@ -97,6 +111,7 @@ async fn upload_file_inner(
     let mut r#gen = ChunkGenerator::new(async_read, chunk_size);
 
     let mut chunk_count: u64 = 0;
+    let mut received: u64 = 0;
     let mut chunk_manifests: Vec<coordinator::types::ChunkManifestEntry> = Vec::new();
 
     loop {
@@ -106,6 +121,15 @@ async fn upload_file_inner(
         let Some(chunk) = chunk else {
             break;
         };
+
+        // Enforce the limit even without a trustworthy content-length.
+        received = received.saturating_add(chunk.data.len() as u64);
+        if exceeds_limit(received, state.max_upload_bytes) {
+            return Err(crate::error::GatewayError::PayloadTooLarge(format!(
+                "upload exceeded limit of {} bytes",
+                state.max_upload_bytes
+            )));
+        }
 
         chunk_count += 1;
 
@@ -303,5 +327,26 @@ where
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exceeds_limit;
+
+    #[test]
+    fn zero_limit_is_unlimited() {
+        assert!(!exceeds_limit(u64::MAX, 0));
+    }
+
+    #[test]
+    fn at_or_below_limit_is_allowed() {
+        assert!(!exceeds_limit(0, 100));
+        assert!(!exceeds_limit(100, 100));
+    }
+
+    #[test]
+    fn above_limit_is_rejected() {
+        assert!(exceeds_limit(101, 100));
     }
 }

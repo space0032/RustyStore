@@ -19,6 +19,7 @@ use std::fmt;
 pub enum GatewayError {
     NotFound,
     InvalidArgument(String),
+    PayloadTooLarge(String),
     Internal(String),
     Grpc(String),
 }
@@ -29,6 +30,7 @@ impl GatewayError {
         match self {
             GatewayError::NotFound => StatusCode::NOT_FOUND,
             GatewayError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+            GatewayError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             GatewayError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             GatewayError::Grpc(_) => StatusCode::BAD_GATEWAY,
         }
@@ -39,6 +41,7 @@ impl GatewayError {
         match self {
             GatewayError::NotFound => "not_found",
             GatewayError::InvalidArgument(_) => "invalid_argument",
+            GatewayError::PayloadTooLarge(_) => "payload_too_large",
             GatewayError::Internal(_) => "internal",
             GatewayError::Grpc(_) => "upstream_error",
         }
@@ -50,6 +53,7 @@ impl fmt::Display for GatewayError {
         match self {
             GatewayError::NotFound => write!(f, "not found"),
             GatewayError::InvalidArgument(s) => write!(f, "invalid argument: {}", s),
+            GatewayError::PayloadTooLarge(s) => write!(f, "payload too large: {}", s),
             GatewayError::Internal(s) => write!(f, "internal: {}", s),
             GatewayError::Grpc(s) => write!(f, "grpc: {}", s),
         }
@@ -124,5 +128,15 @@ mod tests {
         let (s2, b2) = render(GatewayError::Grpc("unavailable".into())).await;
         assert_eq!(s2, StatusCode::BAD_GATEWAY);
         assert!(b2.contains("\"code\":\"upstream_error\""), "body: {b2}");
+    }
+
+    #[tokio::test]
+    async fn payload_too_large_is_413_json() {
+        let (status, body) = render(GatewayError::PayloadTooLarge("too big".into())).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            body.contains("\"code\":\"payload_too_large\""),
+            "body: {body}"
+        );
     }
 }

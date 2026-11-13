@@ -77,6 +77,14 @@ pub async fn run(
             "disabled".to_string()
         }
     );
+    info!(
+        "max upload: {}",
+        if state.max_upload_bytes == 0 {
+            "unlimited".to_string()
+        } else {
+            format!("{} bytes", state.max_upload_bytes)
+        }
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
