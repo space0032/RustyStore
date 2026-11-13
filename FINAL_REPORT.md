@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-13.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-14.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -137,8 +137,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 11 | Runnable Services & Deployment | Complete | `crates/{coordinator,storage-node,gateway}/src/main.rs`, Dockerfiles |
 | 12 | Metrics Endpoint & Counter Wiring | Complete | `observability`, `/metrics`, gateway counters, coordinator gauges |
 | 13 | Per-IP Rate Limiting | Complete | `gateway::rate_limit`, token bucket middleware, `RATE_LIMIT_*` |
+| 14 | Coordinator HTTP Metrics/Health | Complete | `coordinator::http`, `COORDINATOR_HTTP_ADDR`, `/metrics`, `/health` |
 
-Phase documentation: `PHASE-1.md` through `PHASE-13.md`
+Phase documentation: `PHASE-1.md` through `PHASE-14.md`
 
 ---
 
@@ -192,7 +193,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (19 unit + 5 integration = 24 total, all passing)
+### Unit Tests (22 unit + 5 integration = 27 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -204,12 +205,15 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 7. `test_get_capacity` — disk capacity query
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 
-**coordinator** (5 tests):
+**coordinator** (8 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
 4. `test_place_replicas_respects_disk_space` — skip nodes with insufficient disk
 5. `test_place_replicas_excludes_specified_nodes` — respect exclude list
+6. `metrics_render_prometheus_text` — coordinator `/metrics` exposes gauges
+7. `health_returns_ok` — coordinator `/health` returns 200 JSON
+8. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
 
 **gateway** (5 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
@@ -288,7 +292,6 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 5. **No priority queue** — all recovery tasks equal priority (FIFO)
 6. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
-8. **Coordinator metrics not served over HTTP** — gauges are registered in the coordinator process; only the gateway exposes `/metrics`
 
 ---
 
@@ -310,7 +313,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Observability** — tracing (JSON), Prometheus metrics, request tracing
 - **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
-- **24 passing tests** across storage engine, coordinator, gateway, observability, and integration
+- **Both services expose Prometheus metrics** — gateway on `/metrics`, coordinator on a dedicated HTTP port
+- **27 passing tests** across storage engine, coordinator, gateway, observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
