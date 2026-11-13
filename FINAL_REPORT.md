@@ -74,9 +74,9 @@ distributed-storage/
 │   ├── common/             # Shared types, errors, configuration
 │   ├── storage-engine/     # Filesystem chunk store (FsChunkStore), S3 store (feature-gated)
 │   ├── metadata/           # SQLx models + queries against PostgreSQL
-│   ├── coordinator/        # Node registration, health, placement, replication scheduling
-│   ├── storage-node/       # Tonic gRPC server for chunk store/retrieve/replicate
-│   ├── gateway/            # Axum HTTP gateway, streaming upload/download, auth
+│   ├── coordinator/        # Node registration, health, placement, replication scheduling (+ coordinator binary)
+│   ├── storage-node/       # Tonic gRPC server for chunk store/retrieve/replicate (+ storage-node binary)
+│   ├── gateway/            # Axum HTTP gateway, streaming upload/download, auth (+ gateway binary)
 │   ├── replication/        # Recovery scheduling (placeholder for future expansion)
 │   └── observability/      # Tracing + Prometheus metrics setup
 ├── migrations/
@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-10.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-11.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -134,8 +134,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 8 | Hybrid Storage | Complete | `crates/storage-engine/src/s3_store.rs` (feature-gated) |
 | 9 | Testing & Benchmarks | Complete | `tests/src/lib.rs`, `benchmarks/benches/` |
 | 10 | Production Hardening | Complete | `crates/gateway/src/auth.rs`, graceful shutdown, trace/timeout |
+| 11 | Runnable Services & Deployment | Complete | `crates/{coordinator,storage-node,gateway}/src/main.rs`, Dockerfiles |
 
-Phase documentation: `PHASE-1.md` through `PHASE-10.md`
+Phase documentation: `PHASE-1.md` through `PHASE-11.md`
 
 ---
 
@@ -243,17 +244,22 @@ Run with: `cargo bench`
 # 1. Copy environment config
 cp .env.example .env
 
-# 2. Start infrastructure
-docker compose up -d postgres minio
+# 2. Build and start the full stack
+docker compose up -d
+```
 
-# 3. Run migrations
-sqlx migrate run --source ./migrations --database-url "$DATABASE_URL"
+The coordinator applies the schema automatically on startup (embedded,
+idempotent DDL), so no separate migration step is required.
 
-# 4. Build services
+### Local run (service binaries)
+
+```bash
 cargo build --release
 
-# 5. Start services (coordinator, storage nodes, gateway)
-# See docker-compose.yml for service definitions
+DATABASE_URL=postgres://rustystore:rustystore@localhost:5432/rustystore \
+  ./target/release/coordinator
+COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/storage-node
+COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 ```
 
 ### Docker Compose Services
@@ -280,6 +286,9 @@ cargo build --release
 ## Engineering Achievements
 
 - **Multi-crate Cargo workspace** with acyclic dependency graph (12 crates)
+- **Runnable service binaries** — coordinator, storage-node, gateway with env config + JSON tracing
+- **Self-migrating coordinator** — embedded idempotent schema, no external migration step
+- **Node registration + heartbeat** — client-streaming register, auto-reconnecting bidi heartbeat lease renewal
 - **Atomic chunk writes** — temp file → fsync → rename (no partial reads)
 - **SHA-256 integrity** verified on write AND read
 - **Lease-based health** — heartbeat ≠ durability proof; nodes unhealthy only after lease expiry

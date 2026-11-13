@@ -45,17 +45,42 @@ Client (HTTP) -> Gateway (Axum) <-> Coordinator (Tonic gRPC) <-> Storage Nodes (
 # 1. Copy environment config
 cp .env.example .env
 
-# 2. Start infrastructure
+# 2. Build and start the full stack
+#    (Postgres, MinIO, Coordinator, 3 Storage Nodes, Gateway)
+docker compose up -d
+```
+
+The coordinator applies the schema automatically on startup, so no separate
+migration step is required.
+
+## Quick Start (local)
+
+```bash
+# 1. Start PostgreSQL (and optionally MinIO)
 docker compose up -d postgres minio
 
-# 3. Run migrations (sqlx-cli)
-# cargo install sqlx-cli
-sqlx migrate run --source ./migrations --database-url "$DATABASE_URL"
-
-# 4. Build and run services
+# 2. Build the service binaries
 cargo build --release
-# then run coordinator, storage-node(s), gateway separately
+
+# 3. Run each service (separate terminals). Env vars have sane defaults.
+DATABASE_URL=postgres://rustystore:rustystore@localhost:5432/rustystore \
+  ./target/release/coordinator
+
+COORDINATOR_ADDR=127.0.0.1:50051 \
+  ./target/release/storage-node
+
+COORDINATOR_ADDR=127.0.0.1:50051 \
+  ./target/release/gateway
 ```
+
+Service binaries:
+
+| Binary | Default listen | Key environment variables |
+|---|---|---|
+| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES` |
+| `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES` |
+| `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `API_KEY`, `REQUIRE_AUTH` |
+
 
 ## Development
 
