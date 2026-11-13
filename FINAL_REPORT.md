@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-11.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-12.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -135,8 +135,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 9 | Testing & Benchmarks | Complete | `tests/src/lib.rs`, `benchmarks/benches/` |
 | 10 | Production Hardening | Complete | `crates/gateway/src/auth.rs`, graceful shutdown, trace/timeout |
 | 11 | Runnable Services & Deployment | Complete | `crates/{coordinator,storage-node,gateway}/src/main.rs`, Dockerfiles |
+| 12 | Metrics Endpoint & Counter Wiring | Complete | `observability`, `/metrics`, gateway counters, coordinator gauges |
 
-Phase documentation: `PHASE-1.md` through `PHASE-11.md`
+Phase documentation: `PHASE-1.md` through `PHASE-12.md`
 
 ---
 
@@ -153,8 +154,9 @@ Phase documentation: `PHASE-1.md` through `PHASE-11.md`
 | `GET` | `/api/v1/files/{file_id}/download` | Download a file (streaming) | Yes\* |
 | `GET` | `/api/v1/cluster/nodes` | List storage nodes | Yes\* |
 | `GET` | `/api/v1/cluster/stats` | Get cluster statistics | Yes\* |
+| `GET` | `/metrics` | Prometheus metrics | No |
 
-\* Authentication is configurable via `API_KEY` and `REQUIRE_AUTH` environment variables. Disabled by default for development.
+\* Authentication is configurable via `API_KEY` and `REQUIRE_AUTH` environment variables. Disabled by default for development. `/api/v1/health` and `/metrics` are always public.
 
 ### gRPC Services (Internal)
 
@@ -189,7 +191,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (16 unit + 5 integration = 21 total, all passing)
+### Unit Tests (17 unit + 5 integration = 22 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -212,6 +214,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
+
+**observability** (1 test):
+1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
 
 **integration** (5 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
@@ -280,6 +285,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 5. **No priority queue** — all recovery tasks equal priority (FIFO)
 6. **Rate limiting deferred** — `tower-http` API mismatch in current version
 7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
+8. **Coordinator metrics not served over HTTP** — gauges are registered in the coordinator process; only the gateway exposes `/metrics`
 
 ---
 
@@ -299,7 +305,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Authentication middleware** — Bearer token validation
 - **Graceful shutdown** — Ctrl+C handling with in-flight request completion
 - **Observability** — tracing (JSON), Prometheus metrics, request tracing
-- **21 passing tests** across storage engine, coordinator, gateway, and integration
+- **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges
+- **22 passing tests** across storage engine, coordinator, gateway, observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
