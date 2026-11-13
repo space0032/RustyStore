@@ -62,9 +62,9 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Health and metrics endpoints are always public (used by probes/scrapers).
+    // Health, readiness, and metrics endpoints are always public.
     let path = request.uri().path();
-    if path == "/api/v1/health" || path == "/metrics" {
+    if path == "/api/v1/health" || path == "/api/v1/ready" || path == "/metrics" {
         return Ok(next.run(request).await);
     }
 

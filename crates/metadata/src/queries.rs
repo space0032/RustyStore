@@ -36,6 +36,14 @@ impl MetadataStore {
         &self.pool
     }
 
+    /// Cheap connectivity check used by readiness probes.
+    pub async fn ping(&self) -> sqlx::Result<()> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+    }
+
     // ---- nodes -----------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]

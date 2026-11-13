@@ -37,10 +37,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("connecting to PostgreSQL and applying schema");
     let store = Arc::new(MetadataStore::connect_and_migrate(&database_url).await?);
 
-    // Prometheus metrics + health on a separate HTTP port.
+    // Prometheus metrics + health/readiness on a separate HTTP port.
     let http_addr: SocketAddr = env_or("COORDINATOR_HTTP_ADDR", "0.0.0.0:8081").parse()?;
+    let ready_store = Arc::clone(&store);
+    let ready: coordinator::http::ReadyCheck = Arc::new(move || {
+        let store = Arc::clone(&ready_store);
+        Box::pin(async move { store.ping().await.is_ok() })
+    });
     tokio::spawn(async move {
-        if let Err(e) = coordinator::http::serve(http_addr).await {
+        if let Err(e) = coordinator::http::serve(http_addr, ready).await {
             tracing::error!("coordinator HTTP server failed: {e}");
         }
     });

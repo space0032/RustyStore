@@ -106,7 +106,7 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if path == "/metrics" || path == "/api/v1/health" {
+    if path == "/metrics" || path == "/api/v1/health" || path == "/api/v1/ready" {
         return next.run(request).await;
     }
 
