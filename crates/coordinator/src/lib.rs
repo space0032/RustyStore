@@ -6,6 +6,7 @@
 //! under-replication detection, and recovery scheduling.
 
 mod client;
+pub mod http;
 mod placement;
 mod server;
 mod service;
