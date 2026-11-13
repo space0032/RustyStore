@@ -11,7 +11,7 @@ storage-engine = { path = "../storage-engine" }
 observability = { path = "../observability" }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace", "timeout"] }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }

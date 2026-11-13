@@ -13,11 +13,13 @@ mod chunk_utils;
 mod error;
 mod handlers;
 mod rate_limit;
+mod request_id;
 mod routes;
 
 pub use app::AppState;
 pub use auth::{AuthConfig, auth_middleware};
 pub use rate_limit::{RateLimitConfig, RateLimiter, rate_limit_middleware};
+pub use request_id::{REQUEST_ID_HEADER, request_id_middleware, resolve_request_id};
 
 use axum::Router;
 use std::net::SocketAddr;
@@ -45,6 +47,7 @@ pub async fn run(
         .merge(routes::routes(Arc::clone(&state)))
         .layer(
             ServiceBuilder::new()
+                .layer(axum::middleware::from_fn(request_id_middleware))
                 .layer(TraceLayer::new_for_http())
                 .layer(TimeoutLayer::new(Duration::from_secs(30)))
                 .layer(axum::middleware::from_fn_with_state(
