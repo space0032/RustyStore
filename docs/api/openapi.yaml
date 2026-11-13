@@ -298,7 +298,24 @@ paths:
                     type: integer
 
 components:
-  schemas: {}
+  schemas:
+    Error:
+      type: object
+      description: |
+        Structured gateway error. Every response also carries an `x-request-id`
+        header (echoing the client value or a generated UUID) for correlation.
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable error code
+              enum: [not_found, invalid_argument, internal, upstream_error]
+              example: not_found
+            message:
+              type: string
+              example: "not found"
   securitySchemes:
     bearerAuth:
       type: http

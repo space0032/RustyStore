@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-14.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-15.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -138,8 +138,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 12 | Metrics Endpoint & Counter Wiring | Complete | `observability`, `/metrics`, gateway counters, coordinator gauges |
 | 13 | Per-IP Rate Limiting | Complete | `gateway::rate_limit`, token bucket middleware, `RATE_LIMIT_*` |
 | 14 | Coordinator HTTP Metrics/Health | Complete | `coordinator::http`, `COORDINATOR_HTTP_ADDR`, `/metrics`, `/health` |
+| 15 | Structured Errors & Request IDs | Complete | `gateway::error` JSON, `gateway::request_id`, `x-request-id` |
 
-Phase documentation: `PHASE-1.md` through `PHASE-14.md`
+Phase documentation: `PHASE-1.md` through `PHASE-15.md`
 
 ---
 
@@ -193,7 +194,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (22 unit + 5 integration = 27 total, all passing)
+### Unit Tests (29 unit + 5 integration = 34 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -215,12 +216,19 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 7. `health_returns_ok` — coordinator `/health` returns 200 JSON
 8. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
 
-**gateway** (5 tests):
+**gateway** (12 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
 4. `disabled_limiter_allows_all` — rate limiting off is a pass-through
 5. `burst_is_enforced_per_ip` — token bucket exhausts per IP and isolates clients
+6. `not_found_is_404_json` — structured 404 error body
+7. `invalid_argument_is_400_json` — structured 400 with detail
+8. `internal_is_500_and_grpc_is_502` — 500/502 mapping and codes
+9. `generates_uuid_when_absent` — request id generated
+10. `preserves_incoming_id` — client-supplied id reused
+11. `ignores_empty_incoming_id` — empty id replaced
+12. `echoes_request_id_on_response` — middleware echoes id on all responses
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
@@ -314,7 +322,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
 - **Both services expose Prometheus metrics** — gateway on `/metrics`, coordinator on a dedicated HTTP port
-- **27 passing tests** across storage engine, coordinator, gateway, observability, and integration
+- **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
+- **34 passing tests** across storage engine, coordinator, gateway, observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
