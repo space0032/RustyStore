@@ -37,17 +37,14 @@ impl AuthConfig {
         }
     }
 
-    pub fn from_env() -> Self {
+    pub fn try_from_env() -> Result<Self, common::config::ConfigError> {
         let api_key = std::env::var("API_KEY").ok();
-        let require_auth = std::env::var("REQUIRE_AUTH")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(false);
+        let require_auth: bool = common::config::parse_env("REQUIRE_AUTH", false)?;
 
-        match api_key {
+        Ok(match api_key {
             Some(key) if require_auth => Self::enabled(key),
             _ => Self::disabled(),
-        }
+        })
     }
 }
 

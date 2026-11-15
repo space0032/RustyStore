@@ -28,16 +28,13 @@ pub struct RateLimitConfig {
 }
 
 impl RateLimitConfig {
-    pub fn from_env() -> Self {
-        let rps: u32 = std::env::var("RATE_LIMIT_RPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let burst: u32 = std::env::var("RATE_LIMIT_BURST")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| rps.saturating_mul(2).max(1));
-        Self { rps, burst }
+    pub fn try_from_env() -> Result<Self, common::config::ConfigError> {
+        let rps: u32 = common::config::parse_env("RATE_LIMIT_RPS", 0)?;
+        let burst: u32 = match std::env::var("RATE_LIMIT_BURST") {
+            Ok(raw) => common::config::parse_value("RATE_LIMIT_BURST", &raw)?,
+            Err(_) => rps.saturating_mul(2).max(1),
+        };
+        Ok(Self { rps, burst })
     }
 
     pub fn is_enabled(&self) -> bool {

@@ -13,14 +13,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(coordinator_addr: &str) -> Self {
-        let max_upload_bytes = std::env::var("MAX_UPLOAD_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
         Self {
             coordinator_addr: coordinator_addr.to_string(),
             coordinator_client: Mutex::new(None),
-            max_upload_bytes,
+            max_upload_bytes: 0,
         }
     }
 

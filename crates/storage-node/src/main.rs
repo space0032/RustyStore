@@ -3,7 +3,6 @@
 //! Registers with the coordinator, streams periodic heartbeats to renew its
 //! lease, and serves the NodeService/ChunkService/ClusterService gRPC API.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,17 +11,6 @@ use proto::storage::{HeartbeatRequest, RegisterRequest};
 use storage_node::{StorageNode, StorageNodeServer};
 use tonic::Request;
 use uuid::Uuid;
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
 
 /// Ensure an endpoint has an HTTP scheme so tonic's `Channel::from_shared` works.
 fn normalize_endpoint(addr: &str) -> String {
@@ -38,20 +26,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     observability::init()?;
     observability::register_metrics()?;
 
-    let coordinator_addr = normalize_endpoint(&env_or("COORDINATOR_ADDR", "127.0.0.1:50051"));
-    let node_addr = env_or("NODE_ADDR", "0.0.0.0:50051");
-    let advertised_addr = env_or("ADVERTISED_ADDR", &node_addr);
-    let storage_path = env_or("STORAGE_PATH", "./data/chunks");
-    let capacity_bytes: i64 = env_parse("NODE_CAPACITY_BYTES", 100 * 1024 * 1024 * 1024);
+    let coordinator_addr = normalize_endpoint(&common::config::env_string(
+        "COORDINATOR_ADDR",
+        "127.0.0.1:50051",
+    ));
+    let node_addr = common::config::env_string("NODE_ADDR", "0.0.0.0:50051");
+    let advertised_addr = common::config::env_string("ADVERTISED_ADDR", &node_addr);
+    let storage_path = common::config::env_string("STORAGE_PATH", "./data/chunks");
+    common::config::require_non_empty("STORAGE_PATH", &storage_path)?;
+    let capacity_bytes: i64 =
+        common::config::parse_env("NODE_CAPACITY_BYTES", 100 * 1024 * 1024 * 1024)?;
+    common::config::require_positive("NODE_CAPACITY_BYTES", capacity_bytes)?;
 
-    let addr: SocketAddr = node_addr.parse()?;
+    let addr = common::config::parse_addr_value("NODE_ADDR", &node_addr)?;
 
     let node =
         Arc::new(StorageNode::new(advertised_addr.clone(), node_addr.clone(), storage_path).await?);
 
     // Prometheus metrics + health/readiness on a separate HTTP port. Started
     // before registration so liveness works while waiting for the coordinator.
-    let http_addr: SocketAddr = env_or("STORAGE_NODE_HTTP_ADDR", "0.0.0.0:8082").parse()?;
+    let http_addr = common::config::parse_addr("STORAGE_NODE_HTTP_ADDR", "0.0.0.0:8082")?;
     let ready_node = Arc::clone(&node);
     let ready: storage_node::http::ReadyCheck = Arc::new(move || {
         let node = Arc::clone(&ready_node);

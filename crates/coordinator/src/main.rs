@@ -4,41 +4,31 @@
 //! the idempotent schema), and serves the gRPC ClusterService/NodeService with
 //! background lease, under-replication, and recovery tasks.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use coordinator::CoordinatorServer;
 use metadata::MetadataStore;
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     observability::init()?;
     observability::register_metrics()?;
 
-    let database_url = env_or(
+    let database_url = common::config::env_string(
         "DATABASE_URL",
         "postgres://rustystore:rustystore@localhost:5432/rustystore",
     );
-    let addr: SocketAddr = env_or("COORDINATOR_ADDR", "0.0.0.0:50051").parse()?;
-    let replication_factor: i32 = env_parse("REPLICATION_FACTOR", 3);
-    let chunk_size_bytes: i64 = env_parse("CHUNK_SIZE_BYTES", 4 * 1024 * 1024);
+    let addr = common::config::parse_addr("COORDINATOR_ADDR", "0.0.0.0:50051")?;
+    let replication_factor: i32 = common::config::parse_env("REPLICATION_FACTOR", 3)?;
+    common::config::require_positive("REPLICATION_FACTOR", replication_factor as i64)?;
+    let chunk_size_bytes: i64 = common::config::parse_env("CHUNK_SIZE_BYTES", 4 * 1024 * 1024)?;
+    common::config::require_positive("CHUNK_SIZE_BYTES", chunk_size_bytes)?;
 
     tracing::info!("connecting to PostgreSQL and applying schema");
     let store = Arc::new(MetadataStore::connect_and_migrate(&database_url).await?);
 
     // Prometheus metrics + health/readiness on a separate HTTP port.
-    let http_addr: SocketAddr = env_or("COORDINATOR_HTTP_ADDR", "0.0.0.0:8081").parse()?;
+    let http_addr = common::config::parse_addr("COORDINATOR_HTTP_ADDR", "0.0.0.0:8081")?;
     let ready_store = Arc::clone(&store);
     let ready: coordinator::http::ReadyCheck = Arc::new(move || {
         let store = Arc::clone(&ready_store);

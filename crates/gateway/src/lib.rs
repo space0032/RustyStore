@@ -33,14 +33,16 @@ pub async fn run(
     addr: SocketAddr,
     coordinator_addr: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state = Arc::new(AppState::new(&coordinator_addr));
+    let max_upload_bytes: u64 = common::config::parse_env("MAX_UPLOAD_BYTES", 0)?;
+    let state = Arc::new(AppState::new(&coordinator_addr).with_max_upload_bytes(max_upload_bytes));
 
     // Register Prometheus collectors (idempotent).
     observability::register_metrics()?;
 
-    // Build auth + rate-limit configuration from the environment.
-    let auth_config = Arc::new(AuthConfig::from_env());
-    let rate_config = RateLimitConfig::from_env();
+    // Build auth + rate-limit configuration from the environment. Invalid
+    // values fail startup instead of silently weakening protection.
+    let auth_config = Arc::new(AuthConfig::try_from_env()?);
+    let rate_config = RateLimitConfig::try_from_env()?;
     let rate_limiter = Arc::new(RateLimiter::new(rate_config.rps, rate_config.burst));
 
     let app = Router::new()
