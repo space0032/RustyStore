@@ -85,6 +85,9 @@ Configuration is validated at startup: an unparsable value or an out-of-range
 number (for example `REPLICATION_FACTOR=0` or `MAX_UPLOAD_BYTES=10MB`) exits
 non-zero with the offending key instead of silently falling back to a default.
 
+All services handle `SIGINT` (Ctrl+C) and `SIGTERM` (Docker/Kubernetes) and
+shut down gracefully, draining in-flight work before exiting.
+
 
 ### Observability
 

@@ -18,6 +18,15 @@ impl StorageNodeServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::service::StorageNodeServer::run(addr, node).await
     }
+
+    /// Serve until `shutdown` resolves, then drain in-flight requests.
+    pub async fn run_with_shutdown(
+        addr: SocketAddr,
+        node: Arc<StorageNode>,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::service::StorageNodeServer::run_with_shutdown(addr, node, shutdown).await
+    }
 }
 
 impl Default for StorageNodeServer {

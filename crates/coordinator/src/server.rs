@@ -15,18 +15,36 @@ impl CoordinatorServer {
         replication_factor: i32,
         chunk_size_bytes: i64,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        Self::run_with_shutdown(
+            addr,
+            store,
+            replication_factor,
+            chunk_size_bytes,
+            common::shutdown::signal(),
+        )
+        .await
+    }
+
+    /// Serve until `shutdown` resolves, then stop accepting new requests and
+    /// let in-flight requests finish.
+    pub async fn run_with_shutdown(
+        addr: SocketAddr,
+        store: Arc<MetadataStore>,
+        replication_factor: i32,
+        chunk_size_bytes: i64,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let coordinator = Coordinator::new(store, replication_factor, chunk_size_bytes);
         let svc = coordinator.service();
 
         tonic::transport::Server::builder()
             .add_service(svc.into_server())
-            .serve(addr)
+            .serve_with_shutdown(addr, shutdown)
             .await?;
 
         // Background tasks run as long as the Coordinator is alive.
         // The `Coordinator` struct holds the JoinHandles; dropping it
-        // would abort them, but since `serve()` runs forever, they
-        // continue for the process lifetime.
+        // matches the process lifetime.
         drop(coordinator);
         Ok(())
     }

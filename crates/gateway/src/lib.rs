@@ -92,9 +92,7 @@ pub async fn run(
 
     // Graceful shutdown on SIGINT/SIGTERM.
     let graceful = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        common::shutdown::signal().await;
         info!("received shutdown signal, shutting down gracefully");
     };
 

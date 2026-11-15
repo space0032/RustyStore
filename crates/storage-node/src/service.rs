@@ -289,12 +289,38 @@ impl StorageNodeServer {
         addr: std::net::SocketAddr,
         node: Arc<StorageNode>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        Self::run_with_shutdown(addr, node, common::shutdown::signal()).await
+    }
+
+    /// Serve until `shutdown` resolves, then stop accepting new requests and
+    /// let in-flight requests finish.
+    pub async fn run_with_shutdown(
+        addr: std::net::SocketAddr,
+        node: Arc<StorageNode>,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let local = listener.local_addr()?;
+        tracing::info!("storage node gRPC listening on {local}");
+        Self::serve_with_listener_shutdown(listener, node, shutdown).await
+    }
+
+    /// Serve on an already-bound listener (used by tests to pick an ephemeral
+    /// port).
+    pub async fn serve_with_listener_shutdown(
+        listener: tokio::net::TcpListener,
+        node: Arc<StorageNode>,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let svc = StorageNodeService::new(node);
         tonic::transport::Server::builder()
             .add_service(NodeServiceServer::new(svc.clone()))
             .add_service(ChunkServiceServer::new(svc.clone()))
             .add_service(ClusterServiceServer::new(svc))
-            .serve(addr)
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                shutdown,
+            )
             .await?;
         Ok(())
     }
@@ -304,8 +330,9 @@ impl StorageNodeServer {
 mod tests {
     use super::*;
     use proto::storage::{
-        ChunkReference, DeleteChunkRequest, RetrieveChunkRequest, StoreChunkRequest,
-        chunk_service_client::ChunkServiceClient,
+        ChunkReference, DeleteChunkRequest, HealthCheckRequest, RetrieveChunkRequest,
+        StoreChunkRequest, chunk_service_client::ChunkServiceClient,
+        node_service_client::NodeServiceClient,
         retrieve_chunk_response::Payload as RetrievePayload,
         store_chunk_request::Payload as StorePayload,
     };
@@ -469,5 +496,50 @@ mod tests {
             Err(status) => assert_eq!(status.code(), tonic::Code::NotFound),
             Ok(_) => panic!("expected NotFound for missing chunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_stops_server() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = Arc::new(
+            StorageNode::new(
+                "127.0.0.1:0".to_string(),
+                "127.0.0.1:0".to_string(),
+                dir.path(),
+            )
+            .await
+            .expect("node"),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let _ = StorageNodeServer::serve_with_listener_shutdown(listener, node, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client = NodeServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect");
+        let response = client
+            .check(HealthCheckRequest {})
+            .await
+            .expect("check")
+            .into_inner();
+        assert!(response.serving);
+
+        drop(client);
+        tx.send(()).expect("send shutdown");
+
+        let joined = tokio::time::timeout(Duration::from_secs(3), server).await;
+        assert!(joined.is_ok(), "server did not stop after shutdown signal");
+        joined.expect("join").expect("task panicked");
     }
 }
