@@ -148,10 +148,14 @@ impl ChunkService for StorageNodeService {
         let req = request.into_inner();
         let node = self.node.clone();
 
-        let (meta, mut reader) = node
+        let (mut meta, mut reader) = node
             .open_chunk_reader(&req.chunk_id)
             .await
             .map_err(|e| Status::not_found(e.to_string()))?;
+
+        if meta.sha256_hex.is_empty() && !req.expected_sha256.is_empty() {
+            meta.sha256_hex = req.expected_sha256.clone();
+        }
 
         let response_stream = async_stream::stream! {
             yield Ok(RetrieveChunkResponse {
@@ -293,5 +297,177 @@ impl StorageNodeServer {
             .serve(addr)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::storage::{
+        ChunkReference, DeleteChunkRequest, RetrieveChunkRequest, StoreChunkRequest,
+        chunk_service_client::ChunkServiceClient,
+        retrieve_chunk_response::Payload as RetrievePayload,
+        store_chunk_request::Payload as StorePayload,
+    };
+    use sha2::{Digest, Sha256};
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use uuid::Uuid;
+
+    struct TestNode {
+        addr: SocketAddr,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn start_node() -> TestNode {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = Arc::new(
+            StorageNode::new(
+                "127.0.0.1:0".to_string(),
+                "127.0.0.1:0".to_string(),
+                dir.path(),
+            )
+            .await
+            .expect("node"),
+        );
+        let svc = StorageNodeService::new(node);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ChunkServiceServer::new(svc))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .expect("serve");
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        TestNode { addr, _dir: dir }
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        hex::encode(Sha256::digest(data))
+    }
+
+    async fn connect(addr: SocketAddr) -> ChunkServiceClient<tonic::transport::Channel> {
+        ChunkServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect")
+    }
+
+    fn store_stream(
+        chunk_id: &str,
+        data: &[u8],
+        sha: &str,
+    ) -> impl tonic::IntoStreamingRequest<Message = StoreChunkRequest> {
+        let meta = ChunkReference {
+            chunk_id: chunk_id.to_string(),
+            file_id: String::new(),
+            chunk_index: 0,
+            size_bytes: data.len() as i64,
+            sha256_hex: sha.to_string(),
+            replication_factor: 1,
+        };
+        let frames: Vec<Vec<u8>> = data.chunks(7).map(|c| c.to_vec()).collect();
+        tonic::Request::new(async_stream::stream! {
+            yield StoreChunkRequest { payload: Some(StorePayload::Meta(meta)) };
+            for frame in frames {
+                yield StoreChunkRequest { payload: Some(StorePayload::Data(frame)) };
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn grpc_store_retrieve_delete_roundtrip() {
+        let node = start_node().await;
+        let mut client = connect(node.addr).await;
+
+        let chunk_id = Uuid::new_v4().to_string();
+        let data = b"hello distributed storage over grpc".to_vec();
+        let sha = sha256_hex(&data);
+
+        let stored = client
+            .store_chunk(store_stream(&chunk_id, &data, &sha))
+            .await
+            .expect("store")
+            .into_inner();
+        assert!(stored.durable, "chunk should be durable");
+        assert_eq!(stored.chunk_id, chunk_id);
+
+        let mut stream = client
+            .retrieve_chunk(RetrieveChunkRequest {
+                chunk_id: chunk_id.clone(),
+                expected_sha256: sha.clone(),
+            })
+            .await
+            .expect("retrieve")
+            .into_inner();
+
+        let mut got = Vec::new();
+        let mut meta_seen = false;
+        while let Some(message) = stream.message().await.expect("stream message") {
+            match message.payload {
+                Some(RetrievePayload::Meta(meta)) => {
+                    meta_seen = true;
+                    assert_eq!(meta.sha256_hex, sha);
+                    assert_eq!(meta.size_bytes as usize, data.len());
+                }
+                Some(RetrievePayload::Data(bytes)) => got.extend_from_slice(&bytes),
+                None => {}
+            }
+        }
+        assert!(meta_seen, "metadata frame must precede data");
+        assert_eq!(got, data, "retrieved bytes must match");
+
+        let deleted = client
+            .delete_chunk(DeleteChunkRequest {
+                chunk_id: chunk_id.clone(),
+            })
+            .await
+            .expect("delete")
+            .into_inner();
+        assert!(deleted.deleted);
+
+        let after_delete = client
+            .retrieve_chunk(RetrieveChunkRequest {
+                chunk_id,
+                expected_sha256: String::new(),
+            })
+            .await;
+        assert!(after_delete.is_err(), "retrieve after delete must fail");
+    }
+
+    #[tokio::test]
+    async fn grpc_store_rejects_sha_mismatch() {
+        let node = start_node().await;
+        let mut client = connect(node.addr).await;
+
+        let chunk_id = Uuid::new_v4().to_string();
+        let data = b"corrupt me".to_vec();
+        let wrong_sha = sha256_hex(b"different data");
+
+        let result = client
+            .store_chunk(store_stream(&chunk_id, &data, &wrong_sha))
+            .await;
+        assert!(result.is_err(), "mismatched SHA-256 must be rejected");
+    }
+
+    #[tokio::test]
+    async fn grpc_retrieve_missing_chunk_not_found() {
+        let node = start_node().await;
+        let mut client = connect(node.addr).await;
+
+        let result = client
+            .retrieve_chunk(RetrieveChunkRequest {
+                chunk_id: Uuid::new_v4().to_string(),
+                expected_sha256: String::new(),
+            })
+            .await;
+        match result {
+            Err(status) => assert_eq!(status.code(), tonic::Code::NotFound),
+            Ok(_) => panic!("expected NotFound for missing chunk"),
+        }
     }
 }
