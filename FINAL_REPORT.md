@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-20.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-21.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -144,8 +144,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 18 | Storage-Node gRPC Integration Tests | Complete | In-process `ChunkService` tests, `retrieve_chunk` hash fix |
 | 19 | Storage-Node HTTP Health/Metrics | Complete | `storage_node::http`, `/health`, `/ready`, `/metrics`, `STORAGE_NODE_HTTP_ADDR` |
 | 20 | Validated Startup Configuration | Complete | `common::config` parsers/validators, fail-fast mains |
+| 21 | Graceful Shutdown (SIGINT/SIGTERM) | Complete | `common::shutdown`, `serve_with_shutdown` in coordinator + storage node |
 
-Phase documentation: `PHASE-1.md` through `PHASE-20.md`
+Phase documentation: `PHASE-1.md` through `PHASE-21.md`
 
 ---
 
@@ -199,7 +200,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (51 unit + 5 integration = 56 total, all passing)
+### Unit Tests (52 unit + 5 integration = 57 total, all passing)
 
 **common** (6 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -254,7 +255,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
 
-**storage-node** (8 tests: 3 gRPC + 5 HTTP):
+**storage-node** (9 tests: 4 gRPC + 5 HTTP):
 1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`
 2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
 3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
@@ -263,6 +264,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 6. `ready_reports_200_when_storage_ok` — `/ready` 200 when the volume is usable
 7. `ready_reports_503_when_storage_down` — `/ready` 503 when the volume probe fails
 8. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
+9. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
 
 **integration** (5 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
@@ -349,7 +351,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **`FOR UPDATE SKIP LOCKED`** — atomic replication task claiming
 - **Pluggable storage tier** — filesystem (default) + S3/MinIO (feature-gated)
 - **Authentication middleware** — Bearer token validation
-- **Graceful shutdown** — Ctrl+C handling with in-flight request completion
+- **Graceful shutdown** — all services handle SIGINT and SIGTERM (Docker/Kubernetes) and drain in-flight work
 - **Observability** — tracing (JSON), Prometheus metrics, request tracing
 - **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
@@ -358,7 +360,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
-- **56 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
+- **57 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
