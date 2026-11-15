@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-18.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-19.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -142,8 +142,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 16 | Upload Size Limits | Complete | `MAX_UPLOAD_BYTES`, early + streaming enforcement, `413` |
 | 17 | Readiness Probes | Complete | `/api/v1/ready`, coordinator `/ready` with DB ping |
 | 18 | Storage-Node gRPC Integration Tests | Complete | In-process `ChunkService` tests, `retrieve_chunk` hash fix |
+| 19 | Storage-Node HTTP Health/Metrics | Complete | `storage_node::http`, `/health`, `/ready`, `/metrics`, `STORAGE_NODE_HTTP_ADDR` |
 
-Phase documentation: `PHASE-1.md` through `PHASE-18.md`
+Phase documentation: `PHASE-1.md` through `PHASE-19.md`
 
 ---
 
@@ -197,7 +198,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (40 unit + 5 integration = 45 total, all passing)
+### Unit Tests (45 unit + 5 integration = 50 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -244,10 +245,15 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
 
-**storage-node** (3 tests, in-process gRPC):
+**storage-node** (8 tests: 3 gRPC + 5 HTTP):
 1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`
 2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
 3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
+4. `metrics_render_prometheus_text` — storage node `/metrics` exposes Prometheus text
+5. `health_returns_ok` — `/health` returns 200 with `service: storage-node`
+6. `ready_reports_200_when_storage_ok` — `/ready` 200 when the volume is usable
+7. `ready_reports_503_when_storage_down` — `/ready` 503 when the volume probe fails
+8. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
 
 **integration** (5 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
@@ -338,11 +344,11 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Observability** — tracing (JSON), Prometheus metrics, request tracing
 - **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
-- **Both services expose Prometheus metrics** — gateway on `/metrics`, coordinator on a dedicated HTTP port
+- **All services expose Prometheus metrics** — gateway and storage node on `/metrics`, coordinator on a dedicated HTTP port
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
-- **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator probes) for orchestrators
-- **45 passing tests** across storage engine, coordinator, gateway, storage node (in-process gRPC), observability, and integration
+- **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
+- **50 passing tests** across storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
