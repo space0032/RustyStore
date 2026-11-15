@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-17.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-18.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -141,8 +141,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 15 | Structured Errors & Request IDs | Complete | `gateway::error` JSON, `gateway::request_id`, `x-request-id` |
 | 16 | Upload Size Limits | Complete | `MAX_UPLOAD_BYTES`, early + streaming enforcement, `413` |
 | 17 | Readiness Probes | Complete | `/api/v1/ready`, coordinator `/ready` with DB ping |
+| 18 | Storage-Node gRPC Integration Tests | Complete | In-process `ChunkService` tests, `retrieve_chunk` hash fix |
 
-Phase documentation: `PHASE-1.md` through `PHASE-17.md`
+Phase documentation: `PHASE-1.md` through `PHASE-18.md`
 
 ---
 
@@ -196,7 +197,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (37 unit + 5 integration = 42 total, all passing)
+### Unit Tests (40 unit + 5 integration = 45 total, all passing)
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -242,6 +243,11 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
+
+**storage-node** (3 tests, in-process gRPC):
+1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`
+2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
+3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
 
 **integration** (5 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
@@ -336,7 +342,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator probes) for orchestrators
-- **42 passing tests** across storage engine, coordinator, gateway, observability, and integration
+- **45 passing tests** across storage engine, coordinator, gateway, storage node (in-process gRPC), observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
