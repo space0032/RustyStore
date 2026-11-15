@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-19.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-20.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -143,8 +143,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 17 | Readiness Probes | Complete | `/api/v1/ready`, coordinator `/ready` with DB ping |
 | 18 | Storage-Node gRPC Integration Tests | Complete | In-process `ChunkService` tests, `retrieve_chunk` hash fix |
 | 19 | Storage-Node HTTP Health/Metrics | Complete | `storage_node::http`, `/health`, `/ready`, `/metrics`, `STORAGE_NODE_HTTP_ADDR` |
+| 20 | Validated Startup Configuration | Complete | `common::config` parsers/validators, fail-fast mains |
 
-Phase documentation: `PHASE-1.md` through `PHASE-19.md`
+Phase documentation: `PHASE-1.md` through `PHASE-20.md`
 
 ---
 
@@ -198,7 +199,15 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (45 unit + 5 integration = 50 total, all passing)
+### Unit Tests (51 unit + 5 integration = 56 total, all passing)
+
+**common** (6 tests):
+1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
+2. `parse_value_rejects_garbage_with_key_context` — typed error names the key/value
+3. `parse_addr_value_accepts_valid_address` — address parsing
+4. `parse_addr_value_rejects_garbage` — `InvalidAddr` on bad input
+5. `require_positive_rejects_zero_and_negatives` — range validation
+6. `require_non_empty_rejects_blank` — blank-path validation
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -348,7 +357,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
-- **50 passing tests** across storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
+- **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
+- **56 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
