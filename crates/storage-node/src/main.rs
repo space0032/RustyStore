@@ -36,6 +36,7 @@ fn normalize_endpoint(addr: &str) -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     observability::init()?;
+    observability::register_metrics()?;
 
     let coordinator_addr = normalize_endpoint(&env_or("COORDINATOR_ADDR", "127.0.0.1:50051"));
     let node_addr = env_or("NODE_ADDR", "0.0.0.0:50051");
@@ -47,6 +48,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let node =
         Arc::new(StorageNode::new(advertised_addr.clone(), node_addr.clone(), storage_path).await?);
+
+    // Prometheus metrics + health/readiness on a separate HTTP port. Started
+    // before registration so liveness works while waiting for the coordinator.
+    let http_addr: SocketAddr = env_or("STORAGE_NODE_HTTP_ADDR", "0.0.0.0:8082").parse()?;
+    let ready_node = Arc::clone(&node);
+    let ready: storage_node::http::ReadyCheck = Arc::new(move || {
+        let node = Arc::clone(&ready_node);
+        Box::pin(async move { node.node_id().is_some() && node.capacity().await.is_ok() })
+    });
+    tokio::spawn(async move {
+        if let Err(e) = storage_node::http::serve(http_addr, ready).await {
+            tracing::error!("storage node HTTP server failed: {e}");
+        }
+    });
 
     // Register with the coordinator, retrying until it is reachable.
     let node_id = register_with_retry(

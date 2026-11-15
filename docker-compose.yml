@@ -62,10 +62,12 @@ services:
       COORDINATOR_ADDR: coordinator:50051
       NODE_ADDR: 0.0.0.0:50051
       STORAGE_PATH: /data/chunks
+      STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
       DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
       RUST_LOG: info
     ports:
       - "50052:50051"
+      - "8082:8082"
     volumes:
       - sn1_data:/data/chunks
 
@@ -80,10 +82,12 @@ services:
       COORDINATOR_ADDR: coordinator:50051
       NODE_ADDR: 0.0.0.0:50051
       STORAGE_PATH: /data/chunks
+      STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
       DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
       RUST_LOG: info
     ports:
       - "50053:50051"
+      - "8083:8082"
     volumes:
       - sn2_data:/data/chunks
 
@@ -98,10 +102,12 @@ services:
       COORDINATOR_ADDR: coordinator:50051
       NODE_ADDR: 0.0.0.0:50051
       STORAGE_PATH: /data/chunks
+      STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
       DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
       RUST_LOG: info
     ports:
       - "50054:50051"
+      - "8084:8082"
     volumes:
       - sn3_data:/data/chunks
 

@@ -78,7 +78,7 @@ Service binaries:
 | Binary | Default listen | Key environment variables |
 |---|---|---|
 | `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES` |
-| `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES` |
+| `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR` |
 | `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES` |
 
 
@@ -86,8 +86,9 @@ Service binaries:
 
 - Gateway: `GET /metrics`, `GET /api/v1/health` (liveness), `GET /api/v1/ready` (coordinator probe) on `GATEWAY_ADDR`
 - Coordinator: `GET /metrics`, `GET /health` (liveness), `GET /ready` (DB probe) on `COORDINATOR_HTTP_ADDR` (default `0.0.0.0:8081`)
+- Storage node: `GET /metrics`, `GET /health` (liveness), `GET /ready` (storage probe) on `STORAGE_NODE_HTTP_ADDR` (default `0.0.0.0:8082`)
 
-Both `/metrics` endpoints expose Prometheus text format. Gateway metrics cover
+All `/metrics` endpoints expose Prometheus text format. Gateway metrics cover
 upload/download bytes and failures; coordinator metrics cover active nodes and
 under-replicated chunks.
 

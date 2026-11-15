@@ -8,5 +8,7 @@ mod node;
 mod server;
 mod service;
 
+pub mod http;
+
 pub use node::StorageNode;
 pub use server::StorageNodeServer;
