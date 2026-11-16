@@ -27,6 +27,17 @@ impl StorageNodeServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::service::StorageNodeServer::run_with_shutdown(addr, node, shutdown).await
     }
+
+    /// Serve on an already-bound listener until `shutdown` resolves. Useful for
+    /// embedding and for tests that need an ephemeral port.
+    pub async fn serve_with_listener(
+        listener: tokio::net::TcpListener,
+        node: Arc<StorageNode>,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::service::StorageNodeServer::serve_with_listener_shutdown(listener, node, shutdown)
+            .await
+    }
 }
 
 impl Default for StorageNodeServer {

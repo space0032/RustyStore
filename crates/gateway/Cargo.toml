@@ -30,3 +30,6 @@ async-stream = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+storage-node = { path = "../storage-node" }
+async-trait = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }
