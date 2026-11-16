@@ -105,6 +105,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_text(resp).await;
         assert!(body.contains("rustystore_"));
+        assert!(
+            body.contains("rustystore_storage_chunks_stored_total"),
+            "{body}"
+        );
     }
 
     #[tokio::test]

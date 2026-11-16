@@ -97,7 +97,8 @@ shut down gracefully, draining in-flight work before exiting.
 
 All `/metrics` endpoints expose Prometheus text format. Gateway metrics cover
 upload/download bytes and failures; coordinator metrics cover active nodes and
-under-replicated chunks.
+under-replicated chunks; storage nodes report chunks/bytes stored and chunks
+deleted.
 
 ## Development
 

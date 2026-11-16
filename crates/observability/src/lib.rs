@@ -37,6 +37,30 @@ pub static UNDER_REPLICATED_CHUNKS: Lazy<IntGauge> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static STORAGE_CHUNKS_STORED: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "rustystore_storage_chunks_stored_total",
+        "Chunks stored by this storage node",
+    )
+    .unwrap()
+});
+
+pub static STORAGE_BYTES_STORED: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "rustystore_storage_bytes_stored_total",
+        "Chunk bytes stored by this storage node",
+    )
+    .unwrap()
+});
+
+pub static STORAGE_CHUNKS_DELETED: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "rustystore_storage_chunks_deleted_total",
+        "Chunks deleted by this storage node",
+    )
+    .unwrap()
+});
+
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -62,6 +86,9 @@ pub fn register_metrics() -> Result<(), Box<dyn std::error::Error>> {
     register(UPLOAD_FAILURES.clone())?;
     register(ACTIVE_NODES.clone())?;
     register(UNDER_REPLICATED_CHUNKS.clone())?;
+    register(STORAGE_CHUNKS_STORED.clone())?;
+    register(STORAGE_BYTES_STORED.clone())?;
+    register(STORAGE_CHUNKS_DELETED.clone())?;
     Ok(())
 }
 
@@ -91,10 +118,25 @@ mod tests {
         UPLOADED_BYTES.inc();
         DOWNLOADED_BYTES.inc();
         ACTIVE_NODES.set(1);
+        STORAGE_CHUNKS_STORED.inc();
+        STORAGE_BYTES_STORED.inc_by(16);
+        STORAGE_CHUNKS_DELETED.inc();
 
         let text = prometheus_metrics();
         assert!(text.contains("rustystore_uploaded_bytes_total"), "{text}");
         assert!(text.contains("rustystore_downloaded_bytes_total"), "{text}");
         assert!(text.contains("rustystore_active_storage_nodes"), "{text}");
+        assert!(
+            text.contains("rustystore_storage_chunks_stored_total"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rustystore_storage_bytes_stored_total"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rustystore_storage_chunks_deleted_total"),
+            "{text}"
+        );
     }
 }

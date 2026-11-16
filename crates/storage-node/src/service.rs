@@ -135,6 +135,9 @@ impl ChunkService for StorageNodeService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        observability::STORAGE_CHUNKS_STORED.inc();
+        observability::STORAGE_BYTES_STORED.inc_by(data.len() as u64);
+
         Ok(Response::new(StoreChunkResponse {
             chunk_id,
             durable: true,
@@ -207,6 +210,10 @@ impl ChunkService for StorageNodeService {
             .delete_chunk(&req.chunk_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        if deleted {
+            observability::STORAGE_CHUNKS_DELETED.inc();
+        }
 
         Ok(Response::new(DeleteChunkResponse { deleted }))
     }
@@ -422,6 +429,11 @@ mod tests {
             .into_inner();
         assert!(stored.durable, "chunk should be durable");
         assert_eq!(stored.chunk_id, chunk_id);
+        assert!(observability::STORAGE_CHUNKS_STORED.get() >= 1);
+        assert!(
+            observability::STORAGE_BYTES_STORED.get() >= data.len() as u64,
+            "stored byte counter should include the chunk"
+        );
 
         let mut stream = client
             .retrieve_chunk(RetrieveChunkRequest {
@@ -456,6 +468,10 @@ mod tests {
             .expect("delete")
             .into_inner();
         assert!(deleted.deleted);
+        assert!(
+            observability::STORAGE_CHUNKS_DELETED.get() >= 1,
+            "deleted chunk counter should increase"
+        );
 
         let after_delete = client
             .retrieve_chunk(RetrieveChunkRequest {
