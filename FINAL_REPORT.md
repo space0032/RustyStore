@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-21.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-22.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -145,8 +145,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 19 | Storage-Node HTTP Health/Metrics | Complete | `storage_node::http`, `/health`, `/ready`, `/metrics`, `STORAGE_NODE_HTTP_ADDR` |
 | 20 | Validated Startup Configuration | Complete | `common::config` parsers/validators, fail-fast mains |
 | 21 | Graceful Shutdown (SIGINT/SIGTERM) | Complete | `common::shutdown`, `serve_with_shutdown` in coordinator + storage node |
+| 22 | Storage-Node Transfer Metrics | Complete | `rustystore_storage_{chunks,bytes}_stored_total`, `storage_chunks_deleted_total` |
 
-Phase documentation: `PHASE-1.md` through `PHASE-21.md`
+Phase documentation: `PHASE-1.md` through `PHASE-22.md`
 
 ---
 
@@ -256,10 +257,10 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
 
 **storage-node** (9 tests: 4 gRPC + 5 HTTP):
-1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`
+1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`, asserts storage counters advance
 2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
 3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
-4. `metrics_render_prometheus_text` — storage node `/metrics` exposes Prometheus text
+4. `metrics_render_prometheus_text` — storage node `/metrics` exposes Prometheus text including storage counters
 5. `health_returns_ok` — `/health` returns 200 with `service: storage-node`
 6. `ready_reports_200_when_storage_ok` — `/ready` 200 when the volume is usable
 7. `ready_reports_503_when_storage_down` — `/ready` 503 when the volume probe fails
@@ -353,7 +354,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Authentication middleware** — Bearer token validation
 - **Graceful shutdown** — all services handle SIGINT and SIGTERM (Docker/Kubernetes) and drain in-flight work
 - **Observability** — tracing (JSON), Prometheus metrics, request tracing
-- **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges
+- **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges, storage-node chunk/byte store and delete counters
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
 - **All services expose Prometheus metrics** — gateway and storage node on `/metrics`, coordinator on a dedicated HTTP port
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
