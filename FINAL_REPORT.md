@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-26.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-27.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -150,8 +150,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 24 | File Deletion End to End | Complete | `DeleteFile` RPC, metadata-first delete, best-effort byte removal, 404 mapping |
 | 25 | Coordinator-Authoritative Chunking/Replication | Complete | Chunk size + rf returned by `CreateUploadSession`; gateway honors them |
 | 26 | Request-ID Propagation to gRPC | Complete | Task-local id attached to coordinator/storage-node gRPC metadata, incl. spawned tasks |
+| 27 | Durable Replica Recording on Commit | Complete | `ChunkManifest.node_ids`, atomic chunk+replica insert, empty replica list rejected |
 
-Phase documentation: `PHASE-1.md` through `PHASE-26.md`
+Phase documentation: `PHASE-1.md` through `PHASE-27.md`
 
 ---
 
@@ -286,7 +287,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
 4. `test_duplicate_chunk_dedup_by_hash` — content-addressed dedup
 5. `test_corrupted_chunk_detection` — integrity mismatch on verify
-6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404); the fake returns a 2 MB chunk size and rf 2 (proving the gateway honors coordinator settings) and asserts every coordinator call, including those from the spawned download task, carries the HTTP `x-request-id`
+6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404); the fake returns a 2 MB chunk size and rf 2 (proving the gateway honors coordinator settings), records replicas from the gateway's `node_ids` (failing if absent), and asserts every coordinator call, including those from the spawned download task, carries the HTTP `x-request-id`
 
 ### Benchmarks (Criterion)
 
@@ -373,6 +374,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **All services expose Prometheus metrics** — gateway and storage node on `/metrics`, coordinator on a dedicated HTTP port
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response, propagated into coordinator and storage-node gRPC metadata
 - **Request-ID propagation** — a task-local id is attached to outgoing gRPC calls and re-scoped across `tokio::spawn` boundaries (upload replica fan-out, download streaming)
+- **Replica metadata committed with files** — uploads record durable replicas in the same transaction as the chunk and file rows, so manifests are downloadable and deletion can locate chunk bytes
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
