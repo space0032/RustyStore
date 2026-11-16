@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-22.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-23.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -146,8 +146,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 20 | Validated Startup Configuration | Complete | `common::config` parsers/validators, fail-fast mains |
 | 21 | Graceful Shutdown (SIGINT/SIGTERM) | Complete | `common::shutdown`, `serve_with_shutdown` in coordinator + storage node |
 | 22 | Storage-Node Transfer Metrics | Complete | `rustystore_storage_{chunks,bytes}_stored_total`, `storage_chunks_deleted_total` |
+| 23 | End-to-End Upload/Download Test + ID Fix | Complete | `gateway/tests/e2e_upload_download.rs`, coordinator-issued upload/file IDs |
 
-Phase documentation: `PHASE-1.md` through `PHASE-22.md`
+Phase documentation: `PHASE-1.md` through `PHASE-23.md`
 
 ---
 
@@ -201,7 +202,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (52 unit + 5 integration = 57 total, all passing)
+### Unit Tests (52 unit + 6 integration = 58 total, all passing)
 
 **common** (6 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -267,12 +268,13 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
 9. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
 
-**integration** (5 tests):
+**integration** (6 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
 2. `test_placement_with_healthy_nodes` — distinct node selection
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
 4. `test_duplicate_chunk_dedup_by_hash` — content-addressed dedup
 5. `test_corrupted_chunk_detection` — integrity mismatch on verify
+6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, then HTTP download (multi-chunk, byte-for-byte)
 
 ### Benchmarks (Criterion)
 
@@ -361,7 +363,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
-- **57 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
+- **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
+- **58 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
