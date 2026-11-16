@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-24.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-25.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -148,8 +148,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 22 | Storage-Node Transfer Metrics | Complete | `rustystore_storage_{chunks,bytes}_stored_total`, `storage_chunks_deleted_total` |
 | 23 | End-to-End Upload/Download Test + ID Fix | Complete | `gateway/tests/e2e_upload_download.rs`, coordinator-issued upload/file IDs |
 | 24 | File Deletion End to End | Complete | `DeleteFile` RPC, metadata-first delete, best-effort byte removal, 404 mapping |
+| 25 | Coordinator-Authoritative Chunking/Replication | Complete | Chunk size + rf returned by `CreateUploadSession`; gateway honors them |
 
-Phase documentation: `PHASE-1.md` through `PHASE-24.md`
+Phase documentation: `PHASE-1.md` through `PHASE-25.md`
 
 ---
 
@@ -277,7 +278,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
 4. `test_duplicate_chunk_dedup_by_hash` — content-addressed dedup
 5. `test_corrupted_chunk_detection` — integrity mismatch on verify
-6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404)
+6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404); the fake returns a 2 MB chunk size and rf 2, proving the gateway honors coordinator settings
 
 ### Benchmarks (Criterion)
 
@@ -368,6 +369,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
 - **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
 - **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
+- **Coordinator-authoritative chunking** — the coordinator supplies chunk size and replication factor; the gateway uses them, so manifests match actual placement
 - **60 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 

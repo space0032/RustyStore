@@ -85,6 +85,11 @@ Configuration is validated at startup: an unparsable value or an out-of-range
 number (for example `REPLICATION_FACTOR=0` or `MAX_UPLOAD_BYTES=10MB`) exits
 non-zero with the offending key instead of silently falling back to a default.
 
+Chunk size and replication factor are owned by the coordinator
+(`CHUNK_SIZE_BYTES`, `REPLICATION_FACTOR`). The gateway asks for them when it
+creates an upload and reports the same values, so manifests always match actual
+placement.
+
 All services handle `SIGINT` (Ctrl+C) and `SIGTERM` (Docker/Kubernetes) and
 shut down gracefully, draining in-flight work before exiting.
 
