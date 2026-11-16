@@ -110,6 +110,11 @@ upload/download bytes and failures; coordinator metrics cover active nodes and
 under-replicated chunks; storage nodes report chunks/bytes stored and chunks
 deleted.
 
+Every HTTP request gets an `x-request-id` (incoming or generated). The gateway
+attaches it to outgoing gRPC calls — including calls made from spawned upload
+replica and download streaming tasks — so gateway, coordinator, and storage-node
+logs can be correlated by request id.
+
 ## Development
 
 ```bash

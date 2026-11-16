@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-25.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-26.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -149,8 +149,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 23 | End-to-End Upload/Download Test + ID Fix | Complete | `gateway/tests/e2e_upload_download.rs`, coordinator-issued upload/file IDs |
 | 24 | File Deletion End to End | Complete | `DeleteFile` RPC, metadata-first delete, best-effort byte removal, 404 mapping |
 | 25 | Coordinator-Authoritative Chunking/Replication | Complete | Chunk size + rf returned by `CreateUploadSession`; gateway honors them |
+| 26 | Request-ID Propagation to gRPC | Complete | Task-local id attached to coordinator/storage-node gRPC metadata, incl. spawned tasks |
 
-Phase documentation: `PHASE-1.md` through `PHASE-25.md`
+Phase documentation: `PHASE-1.md` through `PHASE-26.md`
 
 ---
 
@@ -204,15 +205,20 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (54 unit + 6 integration = 60 total, all passing)
+### Unit Tests (61 unit + 6 integration = 67 total, all passing)
 
-**common** (6 tests):
+**common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
 2. `parse_value_rejects_garbage_with_key_context` — typed error names the key/value
 3. `parse_addr_value_accepts_valid_address` — address parsing
 4. `parse_addr_value_rejects_garbage` — `InvalidAddr` on bad input
 5. `require_positive_rejects_zero_and_negatives` — range validation
 6. `require_non_empty_rejects_blank` — blank-path validation
+7. `current_is_none_outside_scope` — no request id leaks into unrelated tasks
+8. `scope_exposes_id` — scoped id is readable
+9. `nested_scope_overrides_then_restores` — nested scopes restore the outer id
+10. `scope_opt_none_leaves_unset` — `None` does not create a scope
+11. `scope_opt_some_sets_id` — `Some` scopes the id
 
 **storage-engine** (8 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
@@ -224,7 +230,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 7. `test_get_capacity` — disk capacity query
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 
-**coordinator** (10 tests):
+**coordinator** (12 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -235,6 +241,8 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `ready_reports_200_when_dependencies_ok` — readiness 200 when DB reachable
 9. `ready_reports_503_when_dependencies_down` — readiness 503 when DB down
 10. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
+11. `attaches_current_request_id` — client attaches scoped id as gRPC metadata
+12. `omits_header_without_scope` — no metadata when no request id is scoped
 
 **gateway** (20 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
@@ -278,7 +286,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
 4. `test_duplicate_chunk_dedup_by_hash` — content-addressed dedup
 5. `test_corrupted_chunk_detection` — integrity mismatch on verify
-6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404); the fake returns a 2 MB chunk size and rf 2, proving the gateway honors coordinator settings
+6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404); the fake returns a 2 MB chunk size and rf 2 (proving the gateway honors coordinator settings) and asserts every coordinator call, including those from the spawned download task, carries the HTTP `x-request-id`
 
 ### Benchmarks (Criterion)
 
@@ -363,7 +371,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges, storage-node chunk/byte store and delete counters
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
 - **All services expose Prometheus metrics** — gateway and storage node on `/metrics`, coordinator on a dedicated HTTP port
-- **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response
+- **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response, propagated into coordinator and storage-node gRPC metadata
+- **Request-ID propagation** — a task-local id is attached to outgoing gRPC calls and re-scoped across `tokio::spawn` boundaries (upload replica fan-out, download streaming)
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
