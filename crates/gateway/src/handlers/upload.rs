@@ -202,6 +202,10 @@ async fn store_chunk_to_replicas(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut handles = Vec::new();
 
+    // Spawned tasks do not inherit task-locals: capture the request id now and
+    // re-enter the scope inside each replica task.
+    let request_id = common::request_id::current();
+
     for node_id in node_ids {
         let addr = node_addrs
             .get(node_id)
@@ -210,10 +214,14 @@ async fn store_chunk_to_replicas(
         let chunk_id = *chunk_id;
         let data = data.to_vec();
         let sha256_hex = sha256_hex.to_string();
+        let request_id = request_id.clone();
 
-        handles.push(tokio::spawn(async move {
-            store_chunk_to_node(&addr, chunk_id, data.clone(), sha256_hex.clone()).await
-        }));
+        handles.push(tokio::spawn(common::request_id::scope_opt(
+            request_id,
+            async move {
+                store_chunk_to_node(&addr, chunk_id, data.clone(), sha256_hex.clone()).await
+            },
+        )));
     }
 
     for handle in handles {
@@ -258,7 +266,9 @@ async fn store_chunk_to_node(
         }
     };
 
-    let response = client.store_chunk(tonic::Request::new(stream)).await?;
+    let response = client
+        .store_chunk(crate::grpc::request_with_id(stream))
+        .await?;
     let response = response.into_inner();
 
     if !response.durable {

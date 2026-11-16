@@ -40,7 +40,8 @@ pub async fn request_id_middleware(mut request: Request, next: Next) -> Response
     }
 
     let span = tracing::info_span!("request", request_id = %id);
-    let mut response = next.run(request).instrument(span).await;
+    let mut response =
+        common::request_id::scope(id.clone(), next.run(request).instrument(span)).await;
 
     if let Some(value) = header_value(&id) {
         response.headers_mut().insert(name, value);

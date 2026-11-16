@@ -11,6 +11,7 @@ mod app;
 mod auth;
 mod chunk_utils;
 mod error;
+mod grpc;
 mod handlers;
 mod rate_limit;
 mod request_id;

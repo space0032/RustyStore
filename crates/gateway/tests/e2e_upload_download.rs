@@ -35,6 +35,9 @@ type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 const FAKE_CHUNK_SIZE: i64 = 2 * 1024 * 1024;
 const FAKE_REPLICATION_FACTOR: i32 = 2;
 
+/// Sent on every HTTP request; must reach every coordinator gRPC call.
+const REQUEST_ID: &str = "e2e-trace-1";
+
 #[derive(Clone)]
 struct UploadRecord {
     file_id: Uuid,
@@ -56,6 +59,7 @@ struct FakeState {
     grpc_addr: String,
     uploads: HashMap<Uuid, UploadRecord>,
     files: HashMap<Uuid, FileRecord>,
+    request_ids: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -72,6 +76,15 @@ impl FakeCoordinator {
         };
         Self {
             state: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    /// Record the `x-request-id` metadata the gateway attached, if any.
+    async fn record_request_id<T>(&self, request: &GrpcRequest<T>) {
+        if let Some(value) = request.metadata().get(common::request_id::HEADER)
+            && let Ok(id) = value.to_str()
+        {
+            self.state.lock().await.request_ids.push(id.to_string());
         }
     }
 }
@@ -91,6 +104,7 @@ impl ClusterService for FakeCoordinator {
         &self,
         request: GrpcRequest<CreateUploadSessionRequest>,
     ) -> Result<GrpcResponse<CreateUploadSessionResponse>, Status> {
+        self.record_request_id(&request).await;
         let req = request.into_inner();
         let upload_id = Uuid::new_v4();
         let file_id = Uuid::new_v4();
@@ -116,6 +130,7 @@ impl ClusterService for FakeCoordinator {
         &self,
         request: GrpcRequest<GetChunkPlanRequest>,
     ) -> Result<GrpcResponse<GetChunkPlanResponse>, Status> {
+        self.record_request_id(&request).await;
         let req = request.into_inner();
         let upload_id =
             Uuid::parse_str(&req.upload_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -134,6 +149,7 @@ impl ClusterService for FakeCoordinator {
         &self,
         request: GrpcRequest<CompleteUploadRequest>,
     ) -> Result<GrpcResponse<CompleteUploadResponse>, Status> {
+        self.record_request_id(&request).await;
         let req = request.into_inner();
         let upload_id =
             Uuid::parse_str(&req.upload_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -175,6 +191,7 @@ impl ClusterService for FakeCoordinator {
         &self,
         request: GrpcRequest<GetManifestRequest>,
     ) -> Result<GrpcResponse<GetManifestResponse>, Status> {
+        self.record_request_id(&request).await;
         let req = request.into_inner();
         let file_id =
             Uuid::parse_str(&req.file_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -198,6 +215,7 @@ impl ClusterService for FakeCoordinator {
         &self,
         request: GrpcRequest<DeleteFileRequest>,
     ) -> Result<GrpcResponse<DeleteFileResponse>, Status> {
+        self.record_request_id(&request).await;
         let req = request.into_inner();
         let file_id =
             Uuid::parse_str(&req.file_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -221,8 +239,9 @@ impl ClusterService for FakeCoordinator {
 
     async fn list_nodes(
         &self,
-        _request: GrpcRequest<ListNodesRequest>,
+        request: GrpcRequest<ListNodesRequest>,
     ) -> Result<GrpcResponse<ListNodesResponse>, Status> {
+        self.record_request_id(&request).await;
         let state = self.state.lock().await;
         let node_id = state.node_id.expect("node id configured");
         Ok(GrpcResponse::new(ListNodesResponse {
@@ -286,6 +305,7 @@ async fn upload_then_download_roundtrip() {
         coord_listener.local_addr().expect("coord addr")
     );
     let fake = FakeCoordinator::new(node_id, node_addr.clone());
+    let fake_state = fake.state.clone();
     let coord_task = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(ClusterServiceServer::new(fake))
@@ -296,7 +316,9 @@ async fn upload_then_download_roundtrip() {
             .expect("coordinator serve");
     });
 
-    let app = gateway::router(Arc::new(gateway::AppState::new(&coord_addr)));
+    // Include the request-id middleware so gRPC calls can be correlated.
+    let app = gateway::router(Arc::new(gateway::AppState::new(&coord_addr)))
+        .layer(axum::middleware::from_fn(gateway::request_id_middleware));
 
     // More than one 4 MB chunk so multi-chunk ordering is exercised.
     let payload: Vec<u8> = (0..(5 * 1024 * 1024 + 123))
@@ -307,6 +329,7 @@ async fn upload_then_download_roundtrip() {
         .method("POST")
         .uri("/api/v1/files")
         .header("x-filename", "e2e.bin")
+        .header(common::request_id::HEADER, REQUEST_ID)
         .header("content-length", payload.len().to_string())
         .body(Body::from(payload.clone()))
         .expect("upload request");
@@ -335,6 +358,7 @@ async fn upload_then_download_roundtrip() {
 
     let download_req = Request::builder()
         .uri(format!("/api/v1/files/{file_id}/download"))
+        .header(common::request_id::HEADER, REQUEST_ID)
         .body(Body::empty())
         .expect("download request");
     let download_resp = app.clone().oneshot(download_req).await.expect("download");
@@ -368,6 +392,7 @@ async fn upload_then_download_roundtrip() {
     let delete_req = Request::builder()
         .method("DELETE")
         .uri(format!("/api/v1/files/{file_id}"))
+        .header(common::request_id::HEADER, REQUEST_ID)
         .body(Body::empty())
         .expect("delete request");
     let delete_resp = app.clone().oneshot(delete_req).await.expect("delete");
@@ -393,6 +418,15 @@ async fn upload_then_download_roundtrip() {
             .count(),
         0,
         "chunk bytes must be removed from the storage node"
+    );
+
+    // Every coordinator call made for these requests must carry the HTTP
+    // request id, including calls issued from the spawned download task.
+    let request_ids = fake_state.lock().await.request_ids.clone();
+    assert!(!request_ids.is_empty(), "expected correlated gRPC calls");
+    assert!(
+        request_ids.iter().all(|id| id == REQUEST_ID),
+        "unexpected request ids: {request_ids:?}"
     );
 
     // Metadata is gone: download and metadata lookup both return 404.

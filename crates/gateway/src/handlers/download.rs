@@ -36,11 +36,13 @@ pub async fn download_file(
 
     let state_clone = state.clone();
     let manifest_clone = manifest.clone();
-    tokio::spawn(async move {
+    // Spawned tasks do not inherit task-locals: carry the request id across.
+    let request_id = common::request_id::current();
+    tokio::spawn(common::request_id::scope_opt(request_id, async move {
         if let Err(e) = fetch_and_stream_chunks(state_clone, manifest_clone, tx).await {
             warn!("download stream error: {e}");
         }
-    });
+    }));
 
     let body = axum::body::Body::from_stream(
         tokio_stream::wrappers::ReceiverStream::new(rx).map(|r| r.map_err(std::io::Error::other)),
@@ -129,7 +131,7 @@ async fn retrieve_chunk_from_node(
     };
 
     let mut stream = client
-        .retrieve_chunk(tonic::Request::new(request))
+        .retrieve_chunk(crate::grpc::request_with_id(request))
         .await?
         .into_inner();
 

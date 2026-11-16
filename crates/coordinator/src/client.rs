@@ -11,6 +11,20 @@ use proto::storage::{
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+/// Wrap a message in a `tonic::Request`, attaching the request id scoped in
+/// `common::request_id` as metadata when one is present.
+fn request_with_id<T>(message: T) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    if let Some(id) = common::request_id::current()
+        && let Ok(value) = id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+    {
+        request
+            .metadata_mut()
+            .insert(common::request_id::HEADER, value);
+    }
+    request
+}
+
 /// High-level client for talking to the Coordinator.
 #[derive(Clone)]
 pub struct CoordinatorClient {
@@ -32,7 +46,7 @@ impl CoordinatorClient {
         filename: &str,
         total_size: i64,
     ) -> Result<(Uuid, Uuid, i64, i32), Box<dyn std::error::Error + Send + Sync>> {
-        let req = tonic::Request::new(CreateUploadSessionRequest {
+        let req = request_with_id(CreateUploadSessionRequest {
             filename: filename.to_string(),
             total_size,
             chunk_size: 0,
@@ -49,7 +63,7 @@ impl CoordinatorClient {
         upload_id: Uuid,
         chunk_index: i64,
     ) -> Result<(String, Vec<Uuid>), Box<dyn std::error::Error + Send + Sync>> {
-        let req = tonic::Request::new(GetChunkPlanRequest {
+        let req = request_with_id(GetChunkPlanRequest {
             upload_id: upload_id.to_string(),
             chunk_index,
         });
@@ -69,7 +83,7 @@ impl CoordinatorClient {
         file_id: Uuid,
         chunks: Vec<crate::types::ChunkManifestEntry>,
     ) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
-        let req = tonic::Request::new(CompleteUploadRequest {
+        let req = request_with_id(CompleteUploadRequest {
             upload_id: upload_id.to_string(),
             file_id: file_id.to_string(),
             chunks: chunks
@@ -90,7 +104,7 @@ impl CoordinatorClient {
         &mut self,
         file_id: Uuid,
     ) -> Result<crate::types::Manifest, Box<dyn std::error::Error + Send + Sync>> {
-        let req = tonic::Request::new(GetManifestRequest {
+        let req = request_with_id(GetManifestRequest {
             file_id: file_id.to_string(),
         });
         let resp = self.inner.get_manifest(req).await?;
@@ -126,7 +140,7 @@ impl CoordinatorClient {
         &mut self,
         file_id: Uuid,
     ) -> Result<Vec<(Uuid, Vec<Uuid>)>, Box<dyn std::error::Error + Send + Sync>> {
-        let req = tonic::Request::new(DeleteFileRequest {
+        let req = request_with_id(DeleteFileRequest {
             file_id: file_id.to_string(),
         });
         let resp = self.inner.delete_file(req).await?.into_inner();
@@ -148,7 +162,7 @@ impl CoordinatorClient {
     pub async fn list_nodes(
         &mut self,
     ) -> Result<Vec<crate::types::NodeInfoEntry>, Box<dyn std::error::Error + Send + Sync>> {
-        let req = tonic::Request::new(ListNodesRequest {});
+        let req = request_with_id(ListNodesRequest {});
         let resp = self.inner.list_nodes(req).await?;
         let inner = resp.into_inner();
         Ok(inner
@@ -168,7 +182,7 @@ impl CoordinatorClient {
     pub async fn get_stats(
         &mut self,
     ) -> Result<crate::types::ClusterStats, Box<dyn std::error::Error + Send + Sync>> {
-        let req = tonic::Request::new(GetStatsRequest {});
+        let req = request_with_id(GetStatsRequest {});
         let resp = self.inner.get_stats(req).await?;
         let inner = resp.into_inner();
         Ok(crate::types::ClusterStats {
@@ -180,5 +194,26 @@ impl CoordinatorClient {
             total_chunks: inner.total_chunks,
             under_replicated_chunks: inner.under_replicated_chunks,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_with_id;
+
+    #[tokio::test]
+    async fn attaches_current_request_id() {
+        let request = common::request_id::scope("trace-1", async { request_with_id(()) }).await;
+        let value = request
+            .metadata()
+            .get(common::request_id::HEADER)
+            .expect("request id metadata");
+        assert_eq!(value.to_str().unwrap(), "trace-1");
+    }
+
+    #[tokio::test]
+    async fn omits_header_without_scope() {
+        let request = request_with_id(());
+        assert!(request.metadata().get(common::request_id::HEADER).is_none());
     }
 }
