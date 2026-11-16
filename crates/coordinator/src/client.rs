@@ -31,15 +31,17 @@ impl CoordinatorClient {
         chunk_size: i64,
         replication_factor: i32,
     ) -> Result<(Uuid, Uuid), Box<dyn std::error::Error + Send + Sync>> {
-        let upload_id = Uuid::new_v4();
-        let file_id = Uuid::new_v4();
         let req = tonic::Request::new(CreateUploadSessionRequest {
             filename: filename.to_string(),
             total_size,
             chunk_size,
             replication_factor,
         });
-        let _resp = self.inner.create_upload_session(req).await?;
+        // The coordinator owns ID generation: use the IDs it returns so that
+        // CompleteUpload and GetManifest refer to the same file row.
+        let resp = self.inner.create_upload_session(req).await?.into_inner();
+        let upload_id = Uuid::parse_str(&resp.upload_id)?;
+        let file_id = Uuid::parse_str(&resp.file_id)?;
         Ok((upload_id, file_id))
     }
 
