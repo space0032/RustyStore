@@ -25,12 +25,6 @@ pub struct UploadResponse {
     pub replication_factor: i32,
 }
 
-const DEFAULT_CHUNK_SIZE: i64 = 4 * 1024 * 1024; // 4 MB
-
-fn replication_factor() -> i32 {
-    3
-}
-
 /// Returns `true` when `received` exceeds a non-zero limit. A limit of `0`
 /// disables enforcement.
 fn exceeds_limit(received: u64, max: u64) -> bool {
@@ -76,15 +70,22 @@ async fn upload_file_inner(
         )));
     }
 
-    let chunk_size = DEFAULT_CHUNK_SIZE as usize;
-    let rf = replication_factor();
-
-    // Create upload session with coordinator.
+    // Create upload session with coordinator. The coordinator owns chunk size
+    // and replication factor so the manifest matches actual placement.
     let mut coord_client = state.coord_client().await?;
-    let (upload_id, file_id) = coord_client
-        .create_upload_session(&filename, total_size, chunk_size as i64, rf)
+    let (upload_id, file_id, chunk_size, rf) = coord_client
+        .create_upload_session(&filename, total_size)
         .await
-        .map_err(|e| crate::error::GatewayError::Grpc(e.to_string()))?;
+        .map_err(crate::error::GatewayError::coordinator)?;
+
+    let chunk_size = usize::try_from(chunk_size)
+        .ok()
+        .filter(|size| *size > 0)
+        .ok_or_else(|| {
+            crate::error::GatewayError::Grpc(format!(
+                "coordinator returned invalid chunk size {chunk_size}"
+            ))
+        })?;
 
     info!(
         "upload started: file_id={} upload_id={} filename={} total_size={} chunk_size={} rf={}",

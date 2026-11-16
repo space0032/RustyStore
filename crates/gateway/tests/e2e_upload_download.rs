@@ -30,6 +30,11 @@ use proto::storage::{
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
+// Deliberately different from the gateway's old hardcoded values (4 MB / 3) so
+// the test proves the gateway honors the coordinator's settings.
+const FAKE_CHUNK_SIZE: i64 = 2 * 1024 * 1024;
+const FAKE_REPLICATION_FACTOR: i32 = 2;
+
 #[derive(Clone)]
 struct UploadRecord {
     file_id: Uuid,
@@ -95,13 +100,15 @@ impl ClusterService for FakeCoordinator {
                 file_id,
                 filename: req.filename,
                 total_size: req.total_size,
-                chunk_size: req.chunk_size,
-                replication_factor: req.replication_factor,
+                chunk_size: FAKE_CHUNK_SIZE,
+                replication_factor: FAKE_REPLICATION_FACTOR,
             },
         );
         Ok(GrpcResponse::new(CreateUploadSessionResponse {
             upload_id: upload_id.to_string(),
             file_id: file_id.to_string(),
+            chunk_size: FAKE_CHUNK_SIZE,
+            replication_factor: FAKE_REPLICATION_FACTOR,
         }))
     }
 
@@ -317,8 +324,13 @@ async fn upload_then_download_roundtrip() {
 
     let json: serde_json::Value =
         serde_json::from_slice(&upload_body).expect("upload response json");
-    assert_eq!(json["chunk_count"].as_u64(), Some(2), "expected two chunks");
-    assert_eq!(json["replication_factor"].as_i64(), Some(3));
+    assert_eq!(
+        json["chunk_count"].as_u64(),
+        Some(3),
+        "expected three chunks"
+    );
+    assert_eq!(json["replication_factor"].as_i64(), Some(2));
+    assert_eq!(json["chunk_size"].as_i64(), Some(FAKE_CHUNK_SIZE));
     let file_id = json["file_id"].as_str().expect("file_id").to_string();
 
     let download_req = Request::builder()
@@ -344,12 +356,12 @@ async fn upload_then_download_roundtrip() {
         "downloaded bytes must match the uploaded payload"
     );
 
-    // Two chunks should exist on disk before deletion.
+    // Three chunks should exist on disk before deletion.
     assert_eq!(
         std::fs::read_dir(dir.path())
             .expect("read storage dir")
             .count(),
-        2
+        3
     );
 
     // Delete: metadata first, then the chunk bytes on the storage node.
@@ -372,8 +384,8 @@ async fn upload_then_download_roundtrip() {
     let delete_json: serde_json::Value =
         serde_json::from_slice(&delete_body).expect("delete response json");
     assert_eq!(delete_json["status"], "deleted");
-    assert_eq!(delete_json["chunks"].as_u64(), Some(2));
-    assert_eq!(delete_json["chunk_replicas_deleted"].as_u64(), Some(2));
+    assert_eq!(delete_json["chunks"].as_u64(), Some(3));
+    assert_eq!(delete_json["chunk_replicas_deleted"].as_u64(), Some(3));
     assert_eq!(delete_json["chunk_replicas_failed"].as_u64(), Some(0));
     assert_eq!(
         std::fs::read_dir(dir.path())

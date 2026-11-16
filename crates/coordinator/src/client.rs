@@ -24,25 +24,24 @@ impl CoordinatorClient {
         Ok(Self { inner })
     }
 
+    /// Create an upload session. Returns the coordinator-issued
+    /// `(upload_id, file_id, chunk_size, replication_factor)`; the coordinator
+    /// owns chunking and placement settings.
     pub async fn create_upload_session(
         &mut self,
         filename: &str,
         total_size: i64,
-        chunk_size: i64,
-        replication_factor: i32,
-    ) -> Result<(Uuid, Uuid), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Uuid, Uuid, i64, i32), Box<dyn std::error::Error + Send + Sync>> {
         let req = tonic::Request::new(CreateUploadSessionRequest {
             filename: filename.to_string(),
             total_size,
-            chunk_size,
-            replication_factor,
+            chunk_size: 0,
+            replication_factor: 0,
         });
-        // The coordinator owns ID generation: use the IDs it returns so that
-        // CompleteUpload and GetManifest refer to the same file row.
         let resp = self.inner.create_upload_session(req).await?.into_inner();
         let upload_id = Uuid::parse_str(&resp.upload_id)?;
         let file_id = Uuid::parse_str(&resp.file_id)?;
-        Ok((upload_id, file_id))
+        Ok((upload_id, file_id, resp.chunk_size, resp.replication_factor))
     }
 
     pub async fn get_chunk_plan(

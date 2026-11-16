@@ -168,6 +168,10 @@ message CreateUploadSessionRequest {
 message CreateUploadSessionResponse {
   string upload_id = 1;
   string file_id = 2;
+  // Coordinator-owned settings. The gateway must use these so the manifest
+  // matches actual placement.
+  int64 chunk_size = 3;
+  int32 replication_factor = 4;
 }
 
 message GetChunkPlanRequest {

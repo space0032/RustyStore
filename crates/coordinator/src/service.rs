@@ -713,15 +713,18 @@ impl ClusterService for CoordinatorService {
         let file_id = Uuid::new_v4();
         let upload_id = Uuid::new_v4();
 
+        // The coordinator owns chunk size and replication factor: GetChunkPlan
+        // places using these values, so the file row must record the same ones
+        // (the gateway's request fields are advisory).
         let _ = self
             .store
             .create_file(
                 file_id,
                 &req.filename,
                 req.total_size,
-                req.chunk_size,
+                self.chunk_size_bytes,
                 0,
-                req.replication_factor,
+                self.replication_factor,
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -735,6 +738,8 @@ impl ClusterService for CoordinatorService {
         Ok(Response::new(CreateUploadSessionResponse {
             upload_id: upload_id.to_string(),
             file_id: file_id.to_string(),
+            chunk_size: self.chunk_size_bytes,
+            replication_factor: self.replication_factor,
         }))
     }
 
