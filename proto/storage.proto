@@ -149,6 +149,7 @@ service ClusterService {
   rpc GetChunkPlan(GetChunkPlanRequest) returns (GetChunkPlanResponse);
   rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
   rpc GetManifest(GetManifestRequest) returns (GetManifestResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
 }
@@ -216,6 +217,19 @@ message ChunkLocation {
   int64 size_bytes = 3;
   string sha256_hex = 4;
   repeated string node_ids = 5;
+}
+
+message DeleteFileRequest {
+  string file_id = 1;
+}
+
+// The coordinator removes the file and chunk metadata first, then returns the
+// locations so the caller can delete the chunk bytes from storage nodes. If
+// byte deletion fails, the chunks become unreferenced and are safe to garbage
+// collect; no metadata points at missing data.
+message DeleteFileResponse {
+  bool deleted = 1;
+  repeated ChunkLocation chunks = 2;
 }
 
 message ListNodesRequest {}

@@ -12,11 +12,12 @@ use metadata::models::StorageNodeRow;
 use metadata::{MetadataStore, ReplicationTaskRow};
 use proto::storage::{
     CapacityReport, ChunkLocation, ChunkReference, CompleteUploadRequest, CompleteUploadResponse,
-    CreateUploadSessionRequest, CreateUploadSessionResponse, Empty, GetChunkPlanRequest,
-    GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
-    GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, HeartbeatResponse,
-    ListNodesRequest, ListNodesResponse, NodeInfo, RegisterRequest, RegisterResponse,
-    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, StoreChunkRequest,
+    CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse,
+    Empty, GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
+    GetStatsRequest, GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest,
+    HeartbeatResponse, ListNodesRequest, ListNodesResponse, NodeInfo, RegisterRequest,
+    RegisterResponse, ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest,
+    StoreChunkRequest,
     chunk_service_client::ChunkServiceClient,
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::NodeService,
@@ -879,6 +880,72 @@ impl ClusterService for CoordinatorService {
             chunk_count: file.chunk_count,
             replication_factor: file.replication_factor,
             chunks: chunk_locations,
+        }))
+    }
+
+    async fn delete_file(
+        &self,
+        request: Request<DeleteFileRequest>,
+    ) -> Result<Response<DeleteFileResponse>, Status> {
+        let req = request.into_inner();
+        let file_id =
+            Uuid::parse_str(&req.file_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        if self
+            .store
+            .get_file(file_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .is_none()
+        {
+            return Err(Status::not_found("file not found"));
+        }
+
+        // Collect replica locations before the cascade delete removes them so
+        // the caller can delete the chunk bytes from the storage nodes.
+        let chunks = self
+            .store
+            .chunks_for_file(file_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut locations = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let replicas = self
+                .store
+                .replicas_for_chunk(chunk.chunk_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            locations.push(ChunkLocation {
+                chunk_id: chunk.chunk_id.to_string(),
+                chunk_index: chunk.chunk_index as i64,
+                size_bytes: chunk.size_bytes,
+                sha256_hex: chunk.sha256_hex.clone(),
+                node_ids: replicas.iter().map(|r| r.node_id.to_string()).collect(),
+            });
+        }
+
+        // ON DELETE CASCADE removes chunks, chunk_replicas, replication_tasks,
+        // and upload_sessions for this file.
+        let result = sqlx::query("DELETE FROM files WHERE file_id=$1")
+            .bind(file_id)
+            .execute(self.store.pool())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(Status::not_found("file not found"));
+        }
+
+        info!(
+            "file deleted: file_id={} chunks={}",
+            file_id,
+            locations.len()
+        );
+
+        Ok(Response::new(DeleteFileResponse {
+            deleted: true,
+            chunks: locations,
         }))
     }
 

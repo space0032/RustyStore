@@ -25,7 +25,7 @@ pub async fn download_file(
     let manifest = coord_client
         .get_manifest(file_id)
         .await
-        .map_err(|e| crate::error::GatewayError::Grpc(e.to_string()))?;
+        .map_err(crate::error::GatewayError::coordinator)?;
 
     info!(
         "download started: file_id={} filename={} chunks={} total_size={}",

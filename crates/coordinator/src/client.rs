@@ -4,8 +4,8 @@
 //! methods for upload sessions, chunk placement, manifests, and cluster info.
 
 use proto::storage::{
-    ChunkManifest, CompleteUploadRequest, CreateUploadSessionRequest, GetChunkPlanRequest,
-    GetManifestRequest, GetStatsRequest, ListNodesRequest,
+    ChunkManifest, CompleteUploadRequest, CreateUploadSessionRequest, DeleteFileRequest,
+    GetChunkPlanRequest, GetManifestRequest, GetStatsRequest, ListNodesRequest,
     cluster_service_client::ClusterServiceClient,
 };
 use tonic::transport::Channel;
@@ -119,6 +119,31 @@ impl CoordinatorClient {
                 })
                 .collect(),
         })
+    }
+
+    /// Delete a file's metadata and return the chunk replicas that should be
+    /// removed from storage nodes. Each entry is `(chunk_id, node_ids)`.
+    pub async fn delete_file(
+        &mut self,
+        file_id: Uuid,
+    ) -> Result<Vec<(Uuid, Vec<Uuid>)>, Box<dyn std::error::Error + Send + Sync>> {
+        let req = tonic::Request::new(DeleteFileRequest {
+            file_id: file_id.to_string(),
+        });
+        let resp = self.inner.delete_file(req).await?.into_inner();
+        Ok(resp
+            .chunks
+            .into_iter()
+            .map(|c| {
+                (
+                    Uuid::parse_str(&c.chunk_id).unwrap_or(Uuid::nil()),
+                    c.node_ids
+                        .iter()
+                        .filter_map(|s| Uuid::parse_str(s).ok())
+                        .collect(),
+                )
+            })
+            .collect())
     }
 
     pub async fn list_nodes(

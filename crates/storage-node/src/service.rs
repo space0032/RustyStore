@@ -8,12 +8,12 @@ use crate::StorageNode;
 use futures_util::stream::Stream;
 use proto::storage::{
     CapacityReport, CompleteUploadRequest, CompleteUploadResponse, CreateUploadSessionRequest,
-    CreateUploadSessionResponse, DeleteChunkRequest, DeleteChunkResponse, Empty,
-    GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
-    GetStatsRequest, GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest,
-    HeartbeatResponse, ListNodesRequest, ListNodesResponse, RegisterRequest, RegisterResponse,
-    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, RetrieveChunkResponse,
-    StoreChunkRequest, StoreChunkResponse,
+    CreateUploadSessionResponse, DeleteChunkRequest, DeleteChunkResponse, DeleteFileRequest,
+    DeleteFileResponse, Empty, GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest,
+    GetManifestResponse, GetStatsRequest, GetStatsResponse, HealthCheckRequest,
+    HealthCheckResponse, HeartbeatRequest, HeartbeatResponse, ListNodesRequest, ListNodesResponse,
+    RegisterRequest, RegisterResponse, ReplicateChunkRequest, ReplicateChunkResponse,
+    RetrieveChunkRequest, RetrieveChunkResponse, StoreChunkRequest, StoreChunkResponse,
     chunk_service_server::{ChunkService, ChunkServiceServer},
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::{NodeService, NodeServiceServer},
@@ -265,6 +265,13 @@ impl ClusterService for StorageNodeService {
         _request: Request<GetManifestRequest>,
     ) -> Result<Response<GetManifestResponse>, Status> {
         Err(Status::unimplemented("get_manifest not yet implemented"))
+    }
+
+    async fn delete_file(
+        &self,
+        _request: Request<DeleteFileRequest>,
+    ) -> Result<Response<DeleteFileResponse>, Status> {
+        Err(Status::unimplemented("delete_file not yet implemented"))
     }
 
     async fn node_heartbeat(

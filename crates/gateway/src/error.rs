@@ -25,6 +25,15 @@ pub enum GatewayError {
 }
 
 impl GatewayError {
+    /// Map an error returned by the coordinator client, preserving gRPC
+    /// `NotFound` so callers see a 404 instead of a generic upstream error.
+    pub fn coordinator(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        match e.downcast_ref::<tonic::Status>() {
+            Some(status) if status.code() == tonic::Code::NotFound => GatewayError::NotFound,
+            _ => GatewayError::Grpc(e.to_string()),
+        }
+    }
+
     /// HTTP status code for this error.
     pub fn status(&self) -> StatusCode {
         match self {
@@ -138,5 +147,21 @@ mod tests {
             body.contains("\"code\":\"payload_too_large\""),
             "body: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn coordinator_not_found_maps_to_404() {
+        let err = GatewayError::coordinator(Box::new(tonic::Status::not_found("missing")));
+        let (status, body) = render(err).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("\"code\":\"not_found\""), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn coordinator_unavailable_maps_to_502() {
+        let err = GatewayError::coordinator(Box::new(tonic::Status::unavailable("down")));
+        let (status, body) = render(err).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.contains("\"code\":\"upstream_error\""), "body: {body}");
     }
 }

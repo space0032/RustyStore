@@ -22,10 +22,10 @@ use uuid::Uuid;
 use proto::storage::cluster_service_server::{ClusterService, ClusterServiceServer};
 use proto::storage::{
     ChunkLocation, ChunkManifest, CompleteUploadRequest, CompleteUploadResponse,
-    CreateUploadSessionRequest, CreateUploadSessionResponse, GetChunkPlanRequest,
-    GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
-    GetStatsResponse, HeartbeatRequest, HeartbeatResponse, ListNodesRequest, ListNodesResponse,
-    NodeInfo, ReplicateChunkRequest, ReplicateChunkResponse,
+    CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse,
+    GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
+    GetStatsRequest, GetStatsResponse, HeartbeatRequest, HeartbeatResponse, ListNodesRequest,
+    ListNodesResponse, NodeInfo, ReplicateChunkRequest, ReplicateChunkResponse,
 };
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
@@ -187,6 +187,24 @@ impl ClusterService for FakeCoordinator {
         }))
     }
 
+    async fn delete_file(
+        &self,
+        request: GrpcRequest<DeleteFileRequest>,
+    ) -> Result<GrpcResponse<DeleteFileResponse>, Status> {
+        let req = request.into_inner();
+        let file_id =
+            Uuid::parse_str(&req.file_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let mut state = self.state.lock().await;
+        let file = state
+            .files
+            .remove(&file_id)
+            .ok_or_else(|| Status::not_found("file not found"))?;
+        Ok(GrpcResponse::new(DeleteFileResponse {
+            deleted: true,
+            chunks: file.chunks,
+        }))
+    }
+
     async fn node_heartbeat(
         &self,
         _request: GrpcRequest<Streaming<HeartbeatRequest>>,
@@ -307,7 +325,7 @@ async fn upload_then_download_roundtrip() {
         .uri(format!("/api/v1/files/{file_id}/download"))
         .body(Body::empty())
         .expect("download request");
-    let download_resp = app.oneshot(download_req).await.expect("download");
+    let download_resp = app.clone().oneshot(download_req).await.expect("download");
     assert_eq!(download_resp.status(), StatusCode::OK);
     let expected_len = payload.len().to_string();
     assert_eq!(
@@ -325,6 +343,60 @@ async fn upload_then_download_roundtrip() {
         payload.as_slice(),
         "downloaded bytes must match the uploaded payload"
     );
+
+    // Two chunks should exist on disk before deletion.
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .expect("read storage dir")
+            .count(),
+        2
+    );
+
+    // Delete: metadata first, then the chunk bytes on the storage node.
+    let delete_req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/v1/files/{file_id}"))
+        .body(Body::empty())
+        .expect("delete request");
+    let delete_resp = app.clone().oneshot(delete_req).await.expect("delete");
+    let delete_status = delete_resp.status();
+    let delete_body = axum::body::to_bytes(delete_resp.into_body(), usize::MAX)
+        .await
+        .expect("delete body");
+    assert_eq!(
+        delete_status,
+        StatusCode::OK,
+        "delete failed: {}",
+        String::from_utf8_lossy(&delete_body)
+    );
+    let delete_json: serde_json::Value =
+        serde_json::from_slice(&delete_body).expect("delete response json");
+    assert_eq!(delete_json["status"], "deleted");
+    assert_eq!(delete_json["chunks"].as_u64(), Some(2));
+    assert_eq!(delete_json["chunk_replicas_deleted"].as_u64(), Some(2));
+    assert_eq!(delete_json["chunk_replicas_failed"].as_u64(), Some(0));
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .expect("read storage dir")
+            .count(),
+        0,
+        "chunk bytes must be removed from the storage node"
+    );
+
+    // Metadata is gone: download and metadata lookup both return 404.
+    let download_req = Request::builder()
+        .uri(format!("/api/v1/files/{file_id}/download"))
+        .body(Body::empty())
+        .expect("download request");
+    let resp = app.clone().oneshot(download_req).await.expect("download");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let get_req = Request::builder()
+        .uri(format!("/api/v1/files/{file_id}"))
+        .body(Body::empty())
+        .expect("get request");
+    let resp = app.oneshot(get_req).await.expect("get");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     drop(node_shutdown_tx);
     let _ = node_task.await;
