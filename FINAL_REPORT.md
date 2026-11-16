@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-23.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-24.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -147,8 +147,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 21 | Graceful Shutdown (SIGINT/SIGTERM) | Complete | `common::shutdown`, `serve_with_shutdown` in coordinator + storage node |
 | 22 | Storage-Node Transfer Metrics | Complete | `rustystore_storage_{chunks,bytes}_stored_total`, `storage_chunks_deleted_total` |
 | 23 | End-to-End Upload/Download Test + ID Fix | Complete | `gateway/tests/e2e_upload_download.rs`, coordinator-issued upload/file IDs |
+| 24 | File Deletion End to End | Complete | `DeleteFile` RPC, metadata-first delete, best-effort byte removal, 404 mapping |
 
-Phase documentation: `PHASE-1.md` through `PHASE-23.md`
+Phase documentation: `PHASE-1.md` through `PHASE-24.md`
 
 ---
 
@@ -161,7 +162,7 @@ Phase documentation: `PHASE-1.md` through `PHASE-23.md`
 | `GET` | `/api/v1/health` | Health check | No |
 | `POST` | `/api/v1/files` | Upload a file (streaming) | Yes\* |
 | `GET` | `/api/v1/files/{file_id}` | Get file metadata | Yes\* |
-| `DELETE` | `/api/v1/files/{file_id}` | Delete a file | Yes\* |
+| `DELETE` | `/api/v1/files/{file_id}` | Delete a file (metadata + best-effort chunk bytes; 404 if absent) | Yes\* |
 | `GET` | `/api/v1/files/{file_id}/download` | Download a file (streaming) | Yes\* |
 | `GET` | `/api/v1/cluster/nodes` | List storage nodes | Yes\* |
 | `GET` | `/api/v1/cluster/stats` | Get cluster statistics | Yes\* |
@@ -202,7 +203,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (52 unit + 6 integration = 58 total, all passing)
+### Unit Tests (54 unit + 6 integration = 60 total, all passing)
 
 **common** (6 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -234,7 +235,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 9. `ready_reports_503_when_dependencies_down` — readiness 503 when DB down
 10. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
 
-**gateway** (18 tests):
+**gateway** (20 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
@@ -253,6 +254,8 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 16. `above_limit_is_rejected` — uploads over limit rejected
 17. `ready_response_shape` — readiness JSON shape (ready / not_ready)
 18. `ready_is_503_when_coordinator_unreachable` — readiness fails closed
+19. `coordinator_not_found_maps_to_404` — gRPC NotFound becomes a 404
+20. `coordinator_unavailable_maps_to_502` — other gRPC failures become 502
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
@@ -274,7 +277,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
 4. `test_duplicate_chunk_dedup_by_hash` — content-addressed dedup
 5. `test_corrupted_chunk_detection` — integrity mismatch on verify
-6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, then HTTP download (multi-chunk, byte-for-byte)
+6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404)
 
 ### Benchmarks (Criterion)
 
@@ -364,7 +367,8 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
 - **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
-- **58 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
+- **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
+- **60 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---

@@ -203,7 +203,7 @@ paths:
     delete:
       tags: [files]
       summary: Delete a file
-      description: Marks a file for deletion. Chunks are garbage-collected when no longer referenced.
+      description: Deletes the file and chunk metadata, then removes the chunk bytes from every known storage node. Byte deletion is best-effort; failures leave unreferenced chunks that are safe to garbage-collect.
       operationId: deleteFile
       parameters:
         - in: path
@@ -224,8 +224,24 @@ paths:
                   status:
                     type: string
                     example: "deleted"
-                  message:
+                  file_id:
                     type: string
+                    format: uuid
+                  chunks:
+                    type: integer
+                    description: Number of chunk records removed
+                  chunk_replicas_deleted:
+                    type: integer
+                    description: Replica bytes removed from storage nodes
+                  chunk_replicas_failed:
+                    type: integer
+                    description: Replica deletions that failed (best-effort)
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/v1/files/{file_id}/download:
     get:

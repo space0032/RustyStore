@@ -88,6 +88,11 @@ non-zero with the offending key instead of silently falling back to a default.
 All services handle `SIGINT` (Ctrl+C) and `SIGTERM` (Docker/Kubernetes) and
 shut down gracefully, draining in-flight work before exiting.
 
+`DELETE /api/v1/files/{id}` removes the file and chunk metadata first, then
+deletes the chunk bytes from the storage nodes that held them. Byte deletion is
+best-effort: a failure leaves unreferenced chunks (safe to garbage-collect) but
+never metadata pointing at missing data. Deleting an unknown file returns 404.
+
 
 ### Observability
 
