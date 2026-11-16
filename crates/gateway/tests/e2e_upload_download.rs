@@ -21,11 +21,11 @@ use uuid::Uuid;
 
 use proto::storage::cluster_service_server::{ClusterService, ClusterServiceServer};
 use proto::storage::{
-    ChunkLocation, ChunkManifest, CompleteUploadRequest, CompleteUploadResponse,
-    CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse,
-    GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
-    GetStatsRequest, GetStatsResponse, HeartbeatRequest, HeartbeatResponse, ListNodesRequest,
-    ListNodesResponse, NodeInfo, ReplicateChunkRequest, ReplicateChunkResponse,
+    ChunkLocation, CompleteUploadRequest, CompleteUploadResponse, CreateUploadSessionRequest,
+    CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse, GetChunkPlanRequest,
+    GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
+    GetStatsResponse, HeartbeatRequest, HeartbeatResponse, ListNodesRequest, ListNodesResponse,
+    NodeInfo, ReplicateChunkRequest, ReplicateChunkResponse,
 };
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
@@ -169,18 +169,23 @@ impl ClusterService for FakeCoordinator {
                 "complete_upload file_id does not match the upload session",
             ));
         }
-        let node_id = state.node_id.expect("node id configured").to_string();
-        let chunks: Vec<ChunkLocation> = req
-            .chunks
-            .into_iter()
-            .map(|c: ChunkManifest| ChunkLocation {
+        // Replicas come from the gateway's manifest, not a guess: the real
+        // coordinator records them from this field and downloads depend on it.
+        let mut chunks = Vec::with_capacity(req.chunks.len());
+        for c in req.chunks {
+            if c.node_ids.is_empty() {
+                return Err(Status::invalid_argument(
+                    "chunk manifest is missing replica node_ids",
+                ));
+            }
+            chunks.push(ChunkLocation {
                 chunk_id: c.chunk_id,
                 chunk_index: c.chunk_index,
                 size_bytes: c.size_bytes,
                 sha256_hex: c.sha256_hex,
-                node_ids: vec![node_id.clone()],
-            })
-            .collect();
+                node_ids: c.node_ids,
+            });
+        }
         state.files.insert(file_id, FileRecord { upload, chunks });
         Ok(GrpcResponse::new(CompleteUploadResponse {
             file_id: file_id.to_string(),

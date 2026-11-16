@@ -329,6 +329,50 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Insert a chunk and its durable replicas atomically within `tx`.
+    ///
+    /// Called by `CompleteUpload`: the gateway reports which nodes durably
+    /// stored each chunk, so the manifest can later return those replicas.
+    pub async fn insert_chunk_with_replicas(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        chunk_id: Uuid,
+        sha256_hex: &str,
+        size_bytes: i64,
+        chunk_index: i32,
+        file_id: Uuid,
+        node_ids: &[Uuid],
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO chunks (chunk_id, sha256_hex, size_bytes, chunk_index, file_id)
+            VALUES ($1,$2,$3,$4,$5)
+            "#,
+        )
+        .bind(chunk_id)
+        .bind(sha256_hex)
+        .bind(size_bytes)
+        .bind(chunk_index)
+        .bind(file_id)
+        .execute(&mut **tx)
+        .await?;
+
+        for node_id in node_ids {
+            sqlx::query(
+                r#"
+                INSERT INTO chunk_replicas (chunk_id, node_id, durable)
+                VALUES ($1,$2,true)
+                ON CONFLICT (chunk_id, node_id) DO NOTHING
+                "#,
+            )
+            .bind(chunk_id)
+            .bind(node_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn chunks_for_file(&self, file_id: Uuid) -> sqlx::Result<Vec<ChunkRow>> {
         let rows = sqlx::query_as::<_, ChunkRow>(
             "SELECT * FROM chunks WHERE file_id=$1 ORDER BY chunk_index ASC",

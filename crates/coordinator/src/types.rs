@@ -9,6 +9,8 @@ pub struct ChunkManifestEntry {
     pub chunk_index: i64,
     pub size_bytes: i64,
     pub sha256_hex: String,
+    /// Nodes that durably stored this chunk; recorded as replicas on commit.
+    pub node_ids: Vec<Uuid>,
 }
 
 /// A chunk location entry from the manifest.

@@ -195,6 +195,8 @@ message ChunkManifest {
   int64 chunk_index = 2;
   int64 size_bytes = 3;
   string sha256_hex = 4;
+  // Nodes where the gateway durably stored this chunk, recorded as replicas.
+  repeated string node_ids = 5;
 }
 
 message CompleteUploadResponse {

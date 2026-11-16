@@ -93,6 +93,7 @@ impl CoordinatorClient {
                     chunk_index: c.chunk_index,
                     size_bytes: c.size_bytes,
                     sha256_hex: c.sha256_hex,
+                    node_ids: c.node_ids.iter().map(ToString::to_string).collect(),
                 })
                 .collect(),
         });

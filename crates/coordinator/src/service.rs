@@ -789,17 +789,32 @@ impl ClusterService for CoordinatorService {
             let chunk_id = Uuid::parse_str(&chunk_manifest.chunk_id)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-            let _ = self
-                .store
-                .insert_chunk(
-                    chunk_id,
-                    &chunk_manifest.sha256_hex,
-                    chunk_manifest.size_bytes,
-                    chunk_manifest.chunk_index as i32,
-                    file_id,
-                )
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            // The gateway reports the nodes that durably stored the chunk.
+            // Without replicas the manifest would be undownloadable and the
+            // chunk would look under-replicated forever.
+            if chunk_manifest.node_ids.is_empty() {
+                return Err(Status::invalid_argument(
+                    "chunk manifest is missing replica node_ids",
+                ));
+            }
+            let node_ids = chunk_manifest
+                .node_ids
+                .iter()
+                .map(|id| Uuid::parse_str(id))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            MetadataStore::insert_chunk_with_replicas(
+                &mut tx,
+                chunk_id,
+                &chunk_manifest.sha256_hex,
+                chunk_manifest.size_bytes,
+                chunk_manifest.chunk_index as i32,
+                file_id,
+                &node_ids,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         }
 
         let _ = sqlx::query(

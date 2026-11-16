@@ -161,6 +161,7 @@ async fn upload_file_inner(
             chunk_index: chunk.index as i64,
             size_bytes: chunk.data.len() as i64,
             sha256_hex: chunk.sha256_hex.clone(),
+            node_ids: node_ids.clone(),
         });
 
         info!(
