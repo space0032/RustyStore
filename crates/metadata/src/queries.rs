@@ -463,6 +463,32 @@ impl MetadataStore {
 
     // ---- replication tasks -----------------------------------------------
 
+    /// Whether a chunk already has a live replication task.
+    ///
+    /// The under-replication detector runs on an interval; without this check
+    /// it would enqueue a new task for the same chunk every tick while the
+    /// previous one is still running, causing a task storm. `in_progress` rows
+    /// older than five minutes are treated as abandoned (e.g. the coordinator
+    /// crashed mid-task) so recovery is not blocked forever.
+    pub async fn has_active_replication_task(&self, chunk_id: Uuid) -> sqlx::Result<bool> {
+        let (exists,): (bool,) = sqlx::query_as(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM replication_tasks
+                WHERE chunk_id=$1
+                  AND (
+                    status='pending'
+                    OR (status='in_progress' AND updated_at > now() - INTERVAL '5 minutes')
+                  )
+            )
+            "#,
+        )
+        .bind(chunk_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
     pub async fn create_replication_task(
         &self,
         task_id: Uuid,

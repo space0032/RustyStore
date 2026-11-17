@@ -123,6 +123,13 @@ impl Coordinator {
         observability::UNDER_REPLICATED_CHUNKS.set(under_replicated.len() as i64);
 
         for (chunk_id, _file_id, _required, _actual) in under_replicated {
+            // One active task per chunk: the detector ticks every 10s, and
+            // without this check a slow or failing replication would enqueue
+            // another task each tick.
+            if store.has_active_replication_task(chunk_id).await? {
+                continue;
+            }
+
             // Find a healthy source node that has a durable replica of this chunk.
             let replicas = store.replicas_for_chunk(chunk_id).await?;
             let healthy_nodes = store.healthy_nodes().await?;
