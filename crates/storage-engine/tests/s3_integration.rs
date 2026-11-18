@@ -111,3 +111,30 @@ async fn s3_store_rejects_corrupted_uploads() {
     ));
     assert!(!store.chunk_exists(chunk_id).await.expect("exists"));
 }
+
+#[tokio::test]
+async fn s3_store_multipart_roundtrip() {
+    let Some(store) = store().await else {
+        return;
+    };
+
+    // Above the 16 MiB multipart threshold, producing three parts.
+    let chunk_id = "chunk-multipart";
+    let data = vec![0x5Au8; 17 * 1024 * 1024];
+    let digest = sha256_hex(&data);
+
+    store
+        .store_chunk(chunk_id, &data, &digest)
+        .await
+        .expect("store multipart chunk");
+
+    let entry = store
+        .retrieve_chunk(chunk_id)
+        .await
+        .expect("retrieve multipart chunk");
+    assert_eq!(entry.sha256_hex, digest);
+    assert_eq!(entry.size_bytes, data.len() as u64);
+    assert_eq!(entry.data, data);
+
+    assert!(store.delete_chunk(chunk_id).await.expect("delete"));
+}

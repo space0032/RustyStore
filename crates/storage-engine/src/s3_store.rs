@@ -15,6 +15,14 @@ use common::error::RustyStoreError;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Objects larger than this use a multipart upload. S3 requires every
+/// non-final part to be at least 5 MiB, so the threshold stays comfortably
+/// above that.
+const MULTIPART_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
+const MULTIPART_PART_SIZE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MULTIPART_PARTS: usize = 10_000;
 
 /// S3-compatible chunk store.
 #[derive(Clone)]
@@ -37,6 +45,8 @@ impl S3ChunkStore {
     ) -> StoreResult<Self> {
         use aws_config::BehaviorVersion;
         use aws_config::meta::region::RegionProviderChain;
+        use aws_config::retry::RetryConfig;
+        use aws_config::timeout::TimeoutConfig;
         use aws_sdk_s3::config::Region;
 
         let region_provider =
@@ -47,6 +57,13 @@ impl S3ChunkStore {
         let sdk_config = aws_config::defaults(BehaviorVersion::latest())
             .region(region_provider)
             .endpoint_url(endpoint)
+            .retry_config(RetryConfig::adaptive().with_max_attempts(5))
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_attempt_timeout(Duration::from_secs(60))
+                    .operation_timeout(Duration::from_secs(300))
+                    .build(),
+            )
             .load()
             .await;
 
@@ -101,6 +118,113 @@ impl S3ChunkStore {
         hasher.update(data);
         hex::encode(hasher.finalize())
     }
+
+    /// Split a payload into multipart ranges, with the final range possibly
+    /// shorter than `MULTIPART_PART_SIZE_BYTES`.
+    fn part_ranges(total_len: usize) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        while start < total_len {
+            let end = (start + MULTIPART_PART_SIZE_BYTES).min(total_len);
+            ranges.push((start, end));
+            start = end;
+        }
+        ranges
+    }
+
+    fn is_not_found<E: std::fmt::Display>(error: &E) -> bool {
+        let message = error.to_string();
+        message.contains("NoSuchKey") || message.contains("NotFound") || message.contains("404")
+    }
+
+    async fn abort_multipart(&self, key: &str, upload_id: &str) {
+        let _ = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await;
+    }
+
+    async fn put_multipart(&self, key: &str, data: &[u8]) -> StoreResult<()> {
+        let ranges = Self::part_ranges(data.len());
+        if ranges.is_empty() || ranges.len() > MAX_MULTIPART_PARTS {
+            return Err(RustyStoreError::Internal(format!(
+                "S3 multipart upload requires 1..={MAX_MULTIPART_PARTS} parts, got {}",
+                ranges.len()
+            )));
+        }
+
+        let upload = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| RustyStoreError::Internal(e.to_string()))?;
+        let upload_id = upload.upload_id().ok_or_else(|| {
+            RustyStoreError::Internal("S3 multipart upload returned no upload id".to_string())
+        })?;
+        let upload_id = upload_id.to_string();
+
+        let mut completed_parts = Vec::with_capacity(ranges.len());
+        for (index, (start, end)) in ranges.into_iter().enumerate() {
+            let part_number = (index + 1) as i32;
+            let body = Bytes::copy_from_slice(&data[start..end]);
+            let response = match self
+                .client
+                .upload_part()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .body(body.into())
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    self.abort_multipart(key, &upload_id).await;
+                    return Err(RustyStoreError::Internal(e.to_string()));
+                }
+            };
+
+            let Some(e_tag) = response.e_tag() else {
+                self.abort_multipart(key, &upload_id).await;
+                return Err(RustyStoreError::Internal(format!(
+                    "S3 upload part {part_number} returned no ETag"
+                )));
+            };
+            completed_parts.push(
+                aws_sdk_s3::types::CompletedPart::builder()
+                    .e_tag(e_tag)
+                    .part_number(part_number)
+                    .build(),
+            );
+        }
+
+        let completed = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+            .set_parts(Some(completed_parts))
+            .build();
+        if let Err(e) = self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .multipart_upload(completed)
+            .send()
+            .await
+        {
+            self.abort_multipart(key, &upload_id).await;
+            return Err(RustyStoreError::Internal(e.to_string()));
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -120,8 +244,11 @@ impl ChunkStore for S3ChunkStore {
         }
 
         let key = self.object_key(chunk_id);
-        let body = Bytes::copy_from_slice(data);
+        if data.len() > MULTIPART_THRESHOLD_BYTES {
+            return self.put_multipart(&key, data).await;
+        }
 
+        let body = Bytes::copy_from_slice(data);
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -145,7 +272,7 @@ impl ChunkStore for S3ChunkStore {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NoSuchKey") || e.to_string().contains("NotFound") {
+                if Self::is_not_found(&e) {
                     RustyStoreError::NotFound(format!("chunk {chunk_id} not found"))
                 } else {
                     RustyStoreError::Internal(e.to_string())
@@ -221,10 +348,8 @@ impl ChunkStore for S3ChunkStore {
                     .map_err(|e| RustyStoreError::Internal(e.to_string()))?;
                 Ok(true)
             }
-            Err(_) => {
-                // Object doesn't exist
-                Ok(false)
-            }
+            Err(e) if Self::is_not_found(&e) => Ok(false),
+            Err(e) => Err(RustyStoreError::Internal(e.to_string())),
         }
     }
 
@@ -294,7 +419,7 @@ impl ChunkStore for S3ChunkStore {
             .await
             .map(|_| true)
             .map_err(|e| {
-                if e.to_string().contains("NotFound") || e.to_string().contains("NoSuchKey") {
+                if Self::is_not_found(&e) {
                     RustyStoreError::NotFound(format!("chunk {chunk_id} not found"))
                 } else {
                     RustyStoreError::Internal(e.to_string())
@@ -317,5 +442,31 @@ impl ChunkStore for S3ChunkStore {
 
     fn storage_path(&self) -> &Path {
         Path::new("s3://")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MULTIPART_PART_SIZE_BYTES, S3ChunkStore};
+
+    #[test]
+    fn part_ranges_cover_payload_without_gaps() {
+        let total = MULTIPART_PART_SIZE_BYTES * 2 + 123;
+        let ranges = S3ChunkStore::part_ranges(total);
+
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0], (0, MULTIPART_PART_SIZE_BYTES));
+        assert_eq!(
+            ranges[1],
+            (MULTIPART_PART_SIZE_BYTES, MULTIPART_PART_SIZE_BYTES * 2)
+        );
+        assert_eq!(ranges[2], (MULTIPART_PART_SIZE_BYTES * 2, total));
+        assert!(ranges.windows(2).all(|pair| pair[0].1 == pair[1].0));
+    }
+
+    #[test]
+    fn part_ranges_handle_empty_and_short_payloads() {
+        assert!(S3ChunkStore::part_ranges(0).is_empty());
+        assert_eq!(S3ChunkStore::part_ranges(1), vec![(0, 1)]);
     }
 }
