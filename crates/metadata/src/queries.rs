@@ -262,16 +262,38 @@ impl MetadataStore {
     }
 
     pub async fn mark_task_failed(&self, task_id: Uuid, attempts: i32) -> sqlx::Result<()> {
-        let status = if attempts >= 5 { "failed" } else { "pending" };
         sqlx::query(
-            "UPDATE replication_tasks SET status=$1, attempts=$2, updated_at=now() WHERE task_id=$3",
+            r#"
+            UPDATE replication_tasks
+            SET status = CASE WHEN $1 >= max_attempts THEN 'failed' ELSE 'pending' END,
+                attempts = $1,
+                updated_at = now()
+            WHERE task_id = $2
+            "#,
         )
-        .bind(status)
         .bind(attempts)
         .bind(task_id)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Mark abandoned `in_progress` tasks as failed. A coordinator that
+    /// crashes mid-transfer leaves its claimed tasks behind; the next leader
+    /// fails them so the under-replication detector can enqueue fresh work.
+    pub async fn fail_stale_replication_tasks(&self, stale_secs: i64) -> sqlx::Result<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE replication_tasks
+            SET status='failed', attempts=max_attempts, updated_at=now()
+            WHERE status='in_progress'
+              AND updated_at < now() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(stale_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Get the replication factor for a file.

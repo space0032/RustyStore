@@ -301,7 +301,7 @@ async fn upload_then_download_roundtrip() {
     let node_addr = format!("http://{}", node_listener.local_addr().expect("node addr"));
     let node_id = Uuid::new_v4();
     let node = Arc::new(
-        storage_node::StorageNode::new(node_addr.clone(), node_addr.clone(), dir.path())
+        storage_node::StorageNode::new(dir.path())
             .await
             .expect("create node"),
     );

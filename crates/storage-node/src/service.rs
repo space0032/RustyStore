@@ -6,9 +6,8 @@
 use crate::StorageNode;
 use futures_util::stream::Stream;
 use proto::storage::{
-    ChunkSummary, DeleteChunkRequest, DeleteChunkResponse, ListChunksRequest,
-    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, RetrieveChunkResponse,
-    StoreChunkRequest, StoreChunkResponse,
+    ChunkSummary, DeleteChunkRequest, DeleteChunkResponse, ListChunksRequest, RetrieveChunkRequest,
+    RetrieveChunkResponse, StoreChunkRequest, StoreChunkResponse,
     chunk_service_server::{ChunkService, ChunkServiceServer},
 };
 use std::pin::Pin;
@@ -161,13 +160,6 @@ impl ChunkService for StorageNodeService {
         Ok(Response::new(DeleteChunkResponse { deleted }))
     }
 
-    async fn replicate_chunk(
-        &self,
-        _request: Request<Streaming<ReplicateChunkRequest>>,
-    ) -> Result<Response<ReplicateChunkResponse>, Status> {
-        Err(Status::unimplemented("replicate_chunk not yet implemented"))
-    }
-
     async fn list_chunks(
         &self,
         _request: Request<ListChunksRequest>,
@@ -256,15 +248,7 @@ mod tests {
 
     async fn start_node() -> TestNode {
         let dir = tempfile::tempdir().expect("tempdir");
-        let node = Arc::new(
-            StorageNode::new(
-                "127.0.0.1:0".to_string(),
-                "127.0.0.1:0".to_string(),
-                dir.path(),
-            )
-            .await
-            .expect("node"),
-        );
+        let node = Arc::new(StorageNode::new(dir.path()).await.expect("node"));
         let svc = StorageNodeService::new(node);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -455,15 +439,7 @@ mod tests {
     #[tokio::test]
     async fn graceful_shutdown_stops_server() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let node = Arc::new(
-            StorageNode::new(
-                "127.0.0.1:0".to_string(),
-                "127.0.0.1:0".to_string(),
-                dir.path(),
-            )
-            .await
-            .expect("node"),
-        );
+        let node = Arc::new(StorageNode::new(dir.path()).await.expect("node"));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

@@ -108,22 +108,6 @@ message ChunkSummary {
 }
 
 // ---------------------------------------------------------------------------
-// Replication (coordinator -> storage node, and node -> node)
-// ---------------------------------------------------------------------------
-
-message ReplicateChunkRequest {
-  string chunk_id = 1;
-  string target_node_id = 2;
-  string source_node_id = 3;
-  string expected_sha256 = 4;
-}
-
-message ReplicateChunkResponse {
-  string chunk_id = 1;
-  bool ok = 2;
-}
-
-// ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 
@@ -148,7 +132,6 @@ service ChunkService {
   rpc RetrieveChunk(RetrieveChunkRequest) returns (stream RetrieveChunkResponse);
   rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
   rpc ListChunks(ListChunksRequest) returns (stream ChunkSummary);
-  rpc ReplicateChunk(stream ReplicateChunkRequest) returns (ReplicateChunkResponse);
 }
 
 service ClusterService {

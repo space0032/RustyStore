@@ -258,6 +258,77 @@ async fn claim_replication_task_marks_in_progress_once() {
 }
 
 #[tokio::test]
+async fn replication_task_retry_limit_and_stale_cleanup() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let file_id = file(&store, 2).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+
+    let task_id = Uuid::new_v4();
+    store
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 2, 0)
+        .await
+        .unwrap();
+
+    store.mark_task_failed(task_id, 1).await.unwrap();
+    let (status, attempts): (String, i32) =
+        sqlx::query_as("SELECT status, attempts FROM replication_tasks WHERE task_id=$1")
+            .bind(task_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(status, "pending", "below max_attempts is retryable");
+    assert_eq!(attempts, 1);
+
+    store.mark_task_failed(task_id, 2).await.unwrap();
+    let (status, attempts): (String, i32) =
+        sqlx::query_as("SELECT status, attempts FROM replication_tasks WHERE task_id=$1")
+            .bind(task_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(status, "failed", "max_attempts is honored");
+    assert_eq!(attempts, 2);
+
+    let stale_id = Uuid::new_v4();
+    store
+        .create_replication_task(stale_id, chunk_id, Some(n1), n2, 3, 0)
+        .await
+        .unwrap();
+    store.mark_task_in_progress(stale_id).await.unwrap();
+    assert_eq!(
+        store.fail_stale_replication_tasks(300).await.unwrap(),
+        0,
+        "fresh in-progress work is left alone"
+    );
+
+    sqlx::query(
+        "UPDATE replication_tasks SET updated_at = now() - INTERVAL '10 minutes' WHERE task_id=$1",
+    )
+    .bind(stale_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        store.fail_stale_replication_tasks(300).await.unwrap(),
+        1,
+        "abandoned in-progress work is failed"
+    );
+    let (status, attempts): (String, i32) =
+        sqlx::query_as("SELECT status, attempts FROM replication_tasks WHERE task_id=$1")
+            .bind(stale_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(attempts, 3);
+}
+
+#[tokio::test]
 async fn list_files_paginates_newest_first_and_hides_uploads() {
     let Some((store, _guard)) = setup().await else {
         return;

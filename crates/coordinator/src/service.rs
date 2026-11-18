@@ -45,6 +45,9 @@ const LEADERSHIP_RENEW_INTERVAL: Duration = Duration::from_secs(5);
 /// Lease duration; a crashed coordinator's background work stops within this
 /// window after the process dies.
 const LEADERSHIP_LEASE_MS: i64 = 15_000;
+/// An `in_progress` recovery task untouched for this long is considered
+/// abandoned and is failed so a fresh task can be scheduled.
+const STALE_REPLICATION_TASK_SECS: i64 = 300;
 
 /// Delay needed to transfer `bytes` at the configured rate, if any.
 fn throttle_delay(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) -> Option<Duration> {
@@ -221,10 +224,20 @@ impl Coordinator {
                 let mut interval = tokio::time::interval(interval);
                 loop {
                     interval.tick().await;
-                    if is_leader.load(Ordering::Relaxed)
-                        && let Err(e) = store.expire_leases().await
-                    {
-                        warn!("lease expiry monitor error: {e}");
+                    if is_leader.load(Ordering::Relaxed) {
+                        if let Err(e) = store.expire_leases().await {
+                            warn!("lease expiry monitor error: {e}");
+                        }
+                        match store
+                            .fail_stale_replication_tasks(STALE_REPLICATION_TASK_SECS)
+                            .await
+                        {
+                            Ok(count) if count > 0 => {
+                                warn!("marked {count} abandoned replication tasks as failed");
+                            }
+                            Ok(_) => {}
+                            Err(e) => warn!("stale replication task cleanup error: {e}"),
+                        }
                     }
                     if let Ok(nodes) = store.healthy_nodes().await {
                         observability::ACTIVE_NODES.set(nodes.len() as i64);

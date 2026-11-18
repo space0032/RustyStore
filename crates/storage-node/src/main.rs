@@ -40,14 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = common::config::parse_addr_value("NODE_ADDR", &node_addr)?;
 
-    let node = Arc::new(
-        StorageNode::new(
-            advertised_addr.clone(),
-            advertised_addr.clone(),
-            storage_path,
-        )
-        .await?,
-    );
+    let node = Arc::new(StorageNode::new(storage_path).await?);
 
     // Prometheus metrics + health/readiness on a separate HTTP port. Started
     // before registration so liveness works while waiting for the coordinator.

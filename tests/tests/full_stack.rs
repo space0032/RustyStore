@@ -151,11 +151,7 @@ async fn start_stack(replication_factor: i32, node_count: usize) -> Option<TestS
             .await
             .expect("bind node");
         let grpc_addr = format!("http://{}", listener.local_addr().expect("node addr"));
-        let node = Arc::new(
-            StorageNode::new(grpc_addr.clone(), grpc_addr.clone(), dir.path())
-                .await
-                .expect("create node"),
-        );
+        let node = Arc::new(StorageNode::new(dir.path()).await.expect("create node"));
 
         let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
         let serving_node = Arc::clone(&node);
