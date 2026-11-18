@@ -99,7 +99,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-37.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-38.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -163,8 +163,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 35 | Full-Stack & S3 Integration Tests | Complete | Real coordinator + 3 nodes + gateway on PostgreSQL, node-failure download, re-replication, MinIO S3 tests |
 | 36 | Recovery Race, Provenance, Priority & Throttle | Complete | Parallel source race, persisted actual nodes, priority queue, opt-in bandwidth limit |
 | 37 | Coordinator HA-Lite, Gateway Failover & Image Publishing | Complete | PostgreSQL leadership lease, standby coordinators, gateway retry/failover, Compose healthchecks, GHCR publishing |
+| 38 | Legacy RPC & Workspace Cleanup | Complete | Removed AssignReplica/NodeHeartbeat, storage-node service stubs, dead recovery cycle; workspace metadata and Compose cleanup |
 
-Phase documentation: `PHASE-1.md` through `PHASE-37.md`
+Phase documentation: `PHASE-1.md` through `PHASE-38.md`
 
 ---
 
@@ -190,9 +191,9 @@ Phase documentation: `PHASE-1.md` through `PHASE-37.md`
 
 | Service | RPC | Direction |
 |---|---|---|
-| `NodeService` | `Register`, `Heartbeat`, `ReportCapacity`, `Check` | Storage node → Coordinator |
-| `ChunkService` | `StoreChunk` (streaming), `RetrieveChunk` (streaming), `DeleteChunk`, `ReplicateChunk` | Gateway ↔ Storage node |
-| `ClusterService` | `AssignReplica`, `NodeHeartbeat`, `CreateUploadSession`, `GetChunkPlan`, `CompleteUpload`, `GetManifest`, `ListNodes`, `GetStats` | Coordinator ↔ Storage node / Gateway |
+| `NodeService` | `Register`, `Heartbeat`, `ReportCapacity`, `Check` | Storage node -> Coordinator |
+| `ChunkService` | `StoreChunk` (streaming), `RetrieveChunk` (streaming), `DeleteChunk`, `ListChunks` (streaming), `ReplicateChunk` (streaming) | Gateway / Coordinator -> Storage node |
+| `ClusterService` | `CreateUploadSession`, `GetChunkPlan`, `CompleteUpload`, `GetManifest`, `DeleteFile`, `ListFiles`, `ListNodes`, `GetStats` | Gateway -> Coordinator |
 
 Full OpenAPI spec: `docs/api/openapi.yaml`
 
@@ -483,6 +484,9 @@ coordinator service against the same PostgreSQL database and set
 - **Leadership observability** - `rustystore_coordinator_is_leader` exposes which coordinator owns background work
 - **Compose readiness** - coordinator, storage-node, and gateway healthchecks gate startup, and storage nodes advertise a reachable `ADVERTISED_ADDR`
 - **GHCR image publishing** - version tags publish coordinator, storage-node, and gateway images with buildx cache reuse
+- **Legacy RPC cleanup** - storage nodes expose only `ChunkService`; the unused `AssignReplica`/`NodeHeartbeat` RPCs, storage-node `NodeService`/`ClusterService` stubs, and the dead single-cycle recovery path are gone
+- **Consistent workspace metadata** - every crate inherits version, edition 2024, and `rust-version = "1.85"` from `[workspace.package]`; the duplicate benchmark release profile is removed
+- **Compose cleanup** - dropped the obsolete `version` field and unused storage-node `DATABASE_URL`
 - **105 passing tests** across common config, storage engine, coordinator, gateway, storage node
   (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O

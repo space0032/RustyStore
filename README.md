@@ -34,7 +34,7 @@ Client (HTTP) -> Gateway (Axum) <-> Coordinator (Tonic gRPC) <-> Storage Nodes (
 
 ## Prerequisites
 
-- Rust stable toolchain (2024 edition)
+- Rust 1.85+ (2024 edition)
 - Docker + Docker Compose
 - PostgreSQL 15+ (or use docker-compose)
 
