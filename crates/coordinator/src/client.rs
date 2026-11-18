@@ -90,7 +90,7 @@ impl CoordinatorClient {
     async fn connect_at(
         addr: &str,
     ) -> Result<ClusterServiceClient<Channel>, Box<dyn std::error::Error + Send + Sync>> {
-        let channel = Channel::from_shared(addr.to_string())?.connect().await?;
+        let channel = common::tls::connect(addr).await?;
         Ok(ClusterServiceClient::new(channel))
     }
 

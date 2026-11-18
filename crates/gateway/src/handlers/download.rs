@@ -123,7 +123,8 @@ async fn retrieve_chunk_from_node(
     use proto::storage::RetrieveChunkRequest;
     use proto::storage::chunk_service_client::ChunkServiceClient;
 
-    let mut client = ChunkServiceClient::connect(crate::grpc_endpoint(grpc_addr)).await?;
+    let mut client =
+        ChunkServiceClient::new(common::tls::connect(&crate::grpc_endpoint(grpc_addr)).await?);
 
     let request = RetrieveChunkRequest {
         chunk_id: chunk_id.to_string(),

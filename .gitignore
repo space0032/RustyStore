@@ -6,3 +6,5 @@
 .DS_Store
 migrations/*/sqlx-data.json
 Cargo.lock
+
+certs/

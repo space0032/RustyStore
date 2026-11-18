@@ -215,7 +215,11 @@ impl StorageNodeServer {
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let svc = StorageNodeService::new(node);
-        tonic::transport::Server::builder()
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = common::tls::server_config_from_env()? {
+            builder = builder.tls_config(tls)?;
+        }
+        builder
             .add_service(ChunkServiceServer::new(svc))
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),

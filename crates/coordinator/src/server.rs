@@ -69,7 +69,11 @@ impl CoordinatorServer {
         );
         let svc = coordinator.service();
 
-        tonic::transport::Server::builder()
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = common::tls::server_config_from_env()? {
+            builder = builder.tls_config(tls)?;
+        }
+        builder
             .add_service(svc.into_server())
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),

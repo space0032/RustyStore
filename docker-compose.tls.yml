@@ -1,0 +1,47 @@
+# Optional gRPC mTLS overlay.
+#
+#   ./scripts/gen-certs.sh
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+#
+# HTTP health/metrics ports stay plaintext for probes and should sit behind a
+# TLS-terminating proxy in production.
+services:
+  coordinator:
+    environment:
+      GRPC_TLS_CERT: /certs/coordinator.crt
+      GRPC_TLS_KEY: /certs/coordinator.key
+      GRPC_TLS_CLIENT_CA: /certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+
+  storage-node-1:
+    environment: &storage-tls-env
+      GRPC_TLS_CERT: /certs/storage-node.crt
+      GRPC_TLS_KEY: /certs/storage-node.key
+      GRPC_TLS_CLIENT_CA: /certs/ca.crt
+      GRPC_TLS_CA: /certs/ca.crt
+      GRPC_TLS_CLIENT_CERT: /certs/client.crt
+      GRPC_TLS_CLIENT_KEY: /certs/client.key
+    volumes:
+      - sn1_data:/data/chunks
+      - ./certs:/certs:ro
+
+  storage-node-2:
+    environment: *storage-tls-env
+    volumes:
+      - sn2_data:/data/chunks
+      - ./certs:/certs:ro
+
+  storage-node-3:
+    environment: *storage-tls-env
+    volumes:
+      - sn3_data:/data/chunks
+      - ./certs:/certs:ro
+
+  gateway:
+    environment:
+      GRPC_TLS_CA: /certs/ca.crt
+      GRPC_TLS_CLIENT_CERT: /certs/client.crt
+      GRPC_TLS_CLIENT_KEY: /certs/client.key
+    volumes:
+      - ./certs:/certs:ro

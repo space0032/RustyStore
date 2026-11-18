@@ -84,7 +84,7 @@ fn decode_file_cursor(cursor: &str) -> Result<(i64, Uuid), Status> {
 
 /// Build a gRPC endpoint from a node address, tolerating addresses that
 /// already carry an `http(s)://` scheme.
-fn node_endpoint(addr: &str) -> String {
+pub(crate) fn node_endpoint(addr: &str) -> String {
     if addr.starts_with("http://") || addr.starts_with("https://") {
         addr.to_string()
     } else {
@@ -593,7 +593,7 @@ impl Coordinator {
         bandwidth_bytes_per_sec: Option<u64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let target_addr = node_endpoint(&target_node.grpc_addr);
-        let mut target_client = ChunkServiceClient::connect(target_addr).await?;
+        let mut target_client = ChunkServiceClient::new(common::tls::connect(&target_addr).await?);
 
         let meta = StoreChunkRequest {
             payload: Some(proto::storage::store_chunk_request::Payload::Meta(
@@ -644,7 +644,7 @@ impl Coordinator {
         bandwidth_bytes_per_sec: Option<u64>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let source_addr = node_endpoint(&source_node.grpc_addr);
-        let mut source_client = ChunkServiceClient::connect(source_addr).await?;
+        let mut source_client = ChunkServiceClient::new(common::tls::connect(&source_addr).await?);
 
         let retrieve_req = RetrieveChunkRequest {
             chunk_id: chunk_id.to_string(),

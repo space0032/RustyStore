@@ -10,7 +10,7 @@ storage-engine = { path = "../storage-engine" }
 metadata = { path = "../metadata" }
 proto = { path = "../proto" }
 observability = { path = "../observability" }
-tonic = "0.11"
+tonic = { version = "0.11", features = ["tls"] }
 axum = "0.7"
 futures-util = "0.3"
 async-stream = "0.3"

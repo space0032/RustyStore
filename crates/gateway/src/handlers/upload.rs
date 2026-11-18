@@ -242,7 +242,8 @@ async fn store_chunk_to_node(
     use proto::storage::chunk_service_client::ChunkServiceClient;
     use proto::storage::{ChunkReference, StoreChunkRequest};
 
-    let mut client = ChunkServiceClient::connect(crate::grpc_endpoint(grpc_addr)).await?;
+    let mut client =
+        ChunkServiceClient::new(common::tls::connect(&crate::grpc_endpoint(grpc_addr)).await?);
 
     let meta = StoreChunkRequest {
         payload: Some(proto::storage::store_chunk_request::Payload::Meta(

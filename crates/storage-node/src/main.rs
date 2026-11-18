@@ -157,7 +157,7 @@ async fn register_once(
     advertised_addr: &str,
     capacity_bytes: i64,
 ) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
-    let mut client = NodeServiceClient::connect(coordinator_addr.to_string()).await?;
+    let mut client = NodeServiceClient::new(common::tls::connect(coordinator_addr).await?);
 
     let request = RegisterRequest {
         addr: advertised_addr.to_string(),
@@ -187,7 +187,7 @@ async fn heartbeat_stream(
     node: Arc<StorageNode>,
     node_id: Uuid,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut client = NodeServiceClient::connect(coordinator_addr.to_string()).await?;
+    let mut client = NodeServiceClient::new(common::tls::connect(coordinator_addr).await?);
     let node_id_str = node_id.to_string();
 
     let outbound = async_stream::stream! {

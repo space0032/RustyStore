@@ -172,7 +172,8 @@ async fn delete_chunk_from_node(
     use proto::storage::DeleteChunkRequest;
     use proto::storage::chunk_service_client::ChunkServiceClient;
 
-    let mut client = ChunkServiceClient::connect(crate::grpc_endpoint(grpc_addr)).await?;
+    let mut client =
+        ChunkServiceClient::new(common::tls::connect(&crate::grpc_endpoint(grpc_addr)).await?);
     let response = client
         .delete_chunk(tonic::Request::new(DeleteChunkRequest {
             chunk_id: chunk_id.to_string(),

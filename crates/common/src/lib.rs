@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod request_id;
 pub mod shutdown;
+pub mod tls;
 pub mod types;
 
 pub use error::RustyStoreError;

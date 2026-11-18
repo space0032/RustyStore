@@ -139,8 +139,11 @@ pub async fn run_once(
     let nodes = store.healthy_nodes().await?;
 
     for node in nodes {
-        let addr = format!("http://{}", node.grpc_addr);
-        let mut client = match ChunkServiceClient::connect(addr).await {
+        let addr = crate::service::node_endpoint(&node.grpc_addr);
+        let mut client = match common::tls::connect(&addr)
+            .await
+            .map(ChunkServiceClient::new)
+        {
             Ok(client) => client,
             Err(e) => {
                 warn!("orphan GC: cannot connect to node {}: {e}", node.node_id);
