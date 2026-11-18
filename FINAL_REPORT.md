@@ -99,7 +99,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-35.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-36.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -161,8 +161,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 33 | Recovery Source Failover | Complete | Ordered healthy durable replicas, per-source SHA-256 verification, dead `replication` crate removed |
 | 34 | Recovery Target Failover & Shutdown-Aware Registration | Complete | Recorded target treated as a hint, other healthy non-holders tried, registration retries observe SIGTERM |
 | 35 | Full-Stack & S3 Integration Tests | Complete | Real coordinator + 3 nodes + gateway on PostgreSQL, node-failure download, re-replication, MinIO S3 tests |
+| 36 | Recovery Race, Provenance, Priority & Throttle | Complete | Parallel source race, persisted actual nodes, priority queue, opt-in bandwidth limit |
 
-Phase documentation: `PHASE-1.md` through `PHASE-35.md`
+Phase documentation: `PHASE-1.md` through `PHASE-36.md`
 
 ---
 
@@ -217,7 +218,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Tests (80 unit + 10 integration + 6 PostgreSQL-backed = 96 total, all passing)
+### Tests (81 unit + 10 integration + 7 PostgreSQL-backed = 98 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -243,7 +244,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
 
-**coordinator** (25 tests):
+**coordinator** (26 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -262,13 +263,14 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 16. `file_cursor_roundtrips` — list cursor preserves the exact timestamp and id
 17. `file_cursor_rejects_garbage` — malformed cursors return `InvalidArgument`
 18. `graceful_shutdown_stops_http_server` — the HTTP probe server drains and releases its port on shutdown
-19. `source_candidates_prefers_recorded_source` — the task's source is tried first, then other replicas
-20. `source_candidates_falls_back_when_recorded_source_unhealthy` — an unhealthy source is skipped for a live replica
+19. `source_candidates_prefers_recorded_source` — the task's source leads the parallel race, then other replicas
+20. `source_candidates_falls_back_when_recorded_source_unhealthy` — an unhealthy source is omitted for a live replica
 21. `source_candidates_excludes_target_and_non_durable_replicas` — destination and non-durable rows never become sources
 22. `target_candidates_prefers_recorded_target` — the task's target is tried first, then other healthy nodes
 23. `target_candidates_skips_unhealthy_target_and_occupied_nodes` — dead targets and nodes that already hold the chunk are skipped
 24. `target_candidates_empty_when_no_eligible_node` — recovery fails cleanly when every healthy node is a source or holder
 25. `node_endpoint_adds_scheme_only_when_missing` — recovery tolerates node addresses with or without an `http(s)` scheme
+26. `throttle_delay_matches_configured_rate` - recovery bandwidth conversion handles unset, zero, and byte counts
 
 **gateway** (21 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
@@ -311,13 +313,14 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 12. `registration_stops_when_shutdown_already_requested` — a pre-set shutdown flag skips coordinator registration
 13. `registration_stops_when_shutdown_arrives_while_retrying` — a signal interrupts the registration retry loop
 
-**metadata (6 tests, require `TEST_DATABASE_URL`)**:
+**metadata (7 tests, require `TEST_DATABASE_URL`)**:
 1. `complete_upload_records_chunks_and_durable_replicas` — chunk + durable replica rows committed atomically, manifest readable, no under-replication
 2. `deleting_file_cascades_chunks_replicas_sessions_and_tasks` — FK cascades remove chunks, replicas, upload sessions, and replication tasks
 3. `replication_task_dedup_and_stale_in_progress` — active-task dedup, abandoned `in_progress` expiry, completed tasks inactive
 4. `claim_replication_task_marks_in_progress_once` — `FOR UPDATE SKIP LOCKED` hands a task out exactly once
 5. `existing_chunk_ids_and_stale_upload_reaping` — reference lookup + TTL reaping removes abandoned uploads but keeps committed files
 6. `list_files_paginates_newest_first_and_hides_uploads` — keyset pages have no gaps or duplicates and exclude in-progress uploads
+7. `replication_task_priority_order_and_actual_nodes` - higher-priority tasks are claimed first and completed rows record the actual source/target
 
 These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposable database; otherwise they return early. Provision one with `scripts/test-postgres.sh` / `scripts/test-postgres.ps1`.
 
@@ -331,7 +334,7 @@ These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposab
 7. `full_stack_upload_download_list_delete` — real PostgreSQL + coordinator + 3 storage nodes + gateway: four chunks, 8 replica files, listing, byte-for-byte download, delete, 404
 8. `download_survives_a_storage_node_failure` — stops the first replica of a chunk and downloads from the other
 9. `concurrent_uploads_are_all_committed` — four parallel HTTP uploads commit and appear in one listing page
-10. `recovery_replaces_a_failed_replica` — expires a replica node's lease, marks its replica non-durable, and waits for the detector/scheduler to copy the chunk to the spare node
+10. `recovery_replaces_a_failed_replica` — expires a replica node's lease, marks its replica non-durable, and verifies the detector/scheduler copies the chunk to the spare node and records the actual source/target
 
 **storage-engine S3 (2 tests, require `--features s3` and `TEST_S3_ENDPOINT`)**:
 1. `s3_store_roundtrip_and_integrity` — store, exists, retrieve, verify, list, delete, idempotent re-delete
@@ -407,12 +410,12 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 
 1. **Single Coordinator SPOF** — new writes require the Coordinator; designed for HA evolution
 2. **S3 backend feature-gated** — `cargo build --features storage-engine/s3` required
-3. **No bandwidth throttling** for replication traffic
-4. **No priority queue** — all recovery tasks equal priority (FIFO)
+3. **Recovery bandwidth throttling is opt-in and per-transfer** - `RECOVERY_BANDWIDTH_BYTES_PER_SEC` limits each source/target transfer, not aggregate recovery bandwidth
+4. **Recovery priority is a single integer** — derived from the number of missing replicas, with no aging or per-file priority
 5. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 6. **TLS/mTLS not implemented** — recommended at reverse proxy layer
 7. **PostgreSQL integration tests skip without a database** — locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
-8. **Recovery failover is sequential** — candidate sources and targets are tried one at a time; a successful failover does not rewrite the task's recorded source or target
+8. **Recovery target failover is sequential** — sources race in parallel, but targets are tried one at a time to avoid duplicate replicas; completed tasks record the nodes that actually served the transfer
 9. **Storage nodes advertise their bind address by default** — Compose deployments should set a reachable advertised address for coordinator/gateway connections
 
 ---
@@ -441,7 +444,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Replica metadata committed with files** — uploads record durable replicas in the same transaction as the chunk and file rows, so manifests are downloadable and deletion can locate chunk bytes
 - **Replication task deduplication** — one live task per chunk prevents detector-tick task storms, with stale in-progress tasks expiring so recovery cannot wedge
 - **Orphan-chunk GC** — coordinator lists chunks on healthy nodes, subtracts metadata references, and reclaims bytes older than a grace period; abandoned uploads are reaped on a TTL
-- **PostgreSQL-backed integration tests** — real SQL paths for replica commit, FK cascades, task dedup/claiming, GC reaping, and file pagination, provisioned through a disposable Docker database
+- **PostgreSQL-backed integration tests** — real SQL paths for replica commit, FK cascades, task dedup/priority claiming, GC reaping, and file pagination, provisioned through a disposable Docker database
 - **Paginated file listing** — `GET /api/v1/files` with opaque keyset cursors (timestamp + id), stable newest-first ordering, and a committed-only filter
 - **CI pipeline** — GitHub Actions checks formatting and clippy with warnings denied, runs all workspace tests against PostgreSQL and MinIO service containers, and builds every service image
 - **Working container builds** — Dockerfiles copy the complete workspace (including `benchmarks/` and `tests/` members) and a `.dockerignore` keeps contexts small; all three images build locally and in CI
@@ -451,12 +454,14 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
 - **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
 - **Coordinator-authoritative chunking** — the coordinator supplies chunk size and replication factor; the gateway uses them, so manifests match actual placement
-- **Recovery failover** — replication tries the recorded source first, then any other healthy durable replica, verifying SHA-256 per source before writing; the recorded target is likewise a hint, with other healthy non-holders tried when it is unhealthy or refuses the write
+- **Recovery failover** — recovery races all healthy durable sources in parallel and uses the first SHA-256-verified response, cancelling the rest; the recorded target is a hint, with other healthy non-holders tried sequentially when it is unhealthy or refuses the write; completed tasks record the nodes that actually served the transfer
+- **Priority-aware recovery queue** - tasks carry a priority derived from the number of missing replicas and are claimed highest-priority first
+- **Opt-in recovery bandwidth throttle** - `RECOVERY_BANDWIDTH_BYTES_PER_SEC` limits each source and target transfer without changing the default unlimited path
 - **Shutdown-aware registration** — a storage node waiting for the coordinator stops retrying on SIGINT/SIGTERM and drains its HTTP probes instead of blocking shutdown
 - **Dead-code removal** — the unused `crates/replication` placeholder is gone; the coordinator owns the scheduler (workspace now 11 crates)
 - **Full-stack integration tests** — real coordinator, three storage nodes, PostgreSQL, and the gateway router exercise multi-chunk upload/download/delete, replica failover during download, concurrent uploads, and automatic re-replication after lease expiry
 - **S3/MinIO integration tests** — feature-gated round-trip and integrity tests run in CI against a MinIO service container
-- **96 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
+- **98 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---

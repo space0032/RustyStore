@@ -76,7 +76,7 @@ Service binaries:
 
 | Binary | Default listen | Key environment variables |
 |---|---|---|
-| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS` |
+| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC` |
 | `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR` |
 | `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES` |
 
@@ -112,11 +112,17 @@ on healthy nodes and deleting any that have no metadata row and are older than
 `UPLOAD_SESSION_TTL_SECS`. Set `ORPHAN_GC_INTERVAL_SECS=0` to disable the
 collector.
 
-Recovery treats a task's recorded source and target as hints. If the source is
-unhealthy, unreachable, or returns bytes that fail SHA-256 verification, the
-coordinator retries the transfer from another healthy durable replica. If the
-target is unhealthy or refuses the write, it tries another healthy node that
-does not already hold the chunk.
+Recovery treats a task's recorded source and target as hints. Sources are raced
+in parallel: if the recorded source is unhealthy, unreachable, or returns bytes
+that fail SHA-256 verification, the first other healthy durable replica to
+produce verified bytes wins and the remaining transfers are cancelled. Targets
+are tried sequentially, because racing them could create duplicate replicas; if
+the recorded target is unhealthy or refuses the write, the coordinator tries
+another healthy node that does not already hold the chunk. Completed tasks
+record the source and target that actually served the transfer. Tasks are
+claimed highest-priority first, where priority is the number of missing
+replicas. Set `RECOVERY_BANDWIDTH_BYTES_PER_SEC` to throttle each recovery
+transfer (unset or `0` means unlimited).
 
 
 ### Observability
