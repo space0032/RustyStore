@@ -228,6 +228,10 @@ S3/MinIO tests are feature-gated and run when `TEST_S3_ENDPOINT` is set:
 cargo test -p storage-engine --features s3 --test s3_integration
 ```
 
+The S3 backend retries transient failures with adaptive backoff (five
+attempts), bounds each attempt to 60 seconds, and switches to 8 MiB multipart
+parts for objects above 16 MiB.
+
 ## Continuous Integration
 
 `.github/workflows/ci.yml` runs on every push and pull request:
