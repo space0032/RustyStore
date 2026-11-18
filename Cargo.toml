@@ -8,7 +8,6 @@ members = [
   "crates/coordinator",
   "crates/storage-node",
   "crates/gateway",
-  "crates/replication",
   "crates/observability",
   "benchmarks",
   "tests",

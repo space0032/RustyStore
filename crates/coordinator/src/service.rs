@@ -9,7 +9,7 @@ use crate::placement::place_replicas;
 #[allow(unused_imports)]
 use crate::types::{ChunkLocationEntry, ChunkManifestEntry, ClusterStats, Manifest, NodeInfoEntry};
 use futures_util::stream::Stream;
-use metadata::models::StorageNodeRow;
+use metadata::models::{ChunkReplicaRow, StorageNodeRow};
 use metadata::{MetadataStore, ReplicationTaskRow};
 use proto::storage::{
     CapacityReport, ChunkLocation, ChunkReference, CompleteUploadRequest, CompleteUploadResponse,
@@ -54,6 +54,32 @@ fn decode_file_cursor(cursor: &str) -> Result<(i64, Uuid), Status> {
     let file_id =
         Uuid::parse_str(file_id).map_err(|_| Status::invalid_argument("invalid cursor"))?;
     Ok((micros, file_id))
+}
+
+/// Order the replicas to try as recovery sources.
+///
+/// The task's recorded source is preferred, then any other healthy durable
+/// replica. The target is excluded (it is the destination) and duplicates are
+/// removed so a source is only attempted once.
+fn source_candidates(
+    preferred: Option<Uuid>,
+    replicas: &[ChunkReplicaRow],
+    healthy: &std::collections::HashSet<Uuid>,
+    target: Uuid,
+) -> Vec<Uuid> {
+    let mut candidates = Vec::new();
+    let mut consider = |node_id: Uuid| {
+        if node_id != target && healthy.contains(&node_id) && !candidates.contains(&node_id) {
+            candidates.push(node_id);
+        }
+    };
+    if let Some(node_id) = preferred {
+        consider(node_id);
+    }
+    for replica in replicas.iter().filter(|r| r.durable) {
+        consider(replica.node_id);
+    }
+    candidates
 }
 
 /// The Coordinator: gRPC service + background recovery tasks.
@@ -255,60 +281,35 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Execute a single replication task: transfer chunk from source to target.
+    /// Execute a single replication task: transfer chunk from a source replica
+    /// to the target. If the recorded source is unhealthy or fails mid-transfer,
+    /// try the chunk's other healthy durable replicas before failing the task.
     async fn execute_recovery_task(
         store: &Arc<MetadataStore>,
         task: ReplicationTaskRow,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunk_id = task.chunk_id;
         let target_node_id = task.target_node_id;
-        let source_node_id = match task.source_node_id {
-            Some(id) => id,
-            None => {
-                warn!("task {} has no source node, failing", task.task_id);
-                store
-                    .mark_task_failed(task.task_id, task.attempts + 1)
-                    .await?;
-                return Ok(());
-            }
-        };
+        let preferred_source = task.source_node_id;
 
         // Look up node addresses.
         let nodes = store.all_nodes().await?;
         let node_map: std::collections::HashMap<Uuid, StorageNodeRow> =
             nodes.into_iter().map(|n| (n.node_id, n)).collect();
 
-        let source_node = match node_map.get(&source_node_id) {
-            Some(n) => n,
-            None => {
-                warn!(
-                    "source node {} not found, failing task {}",
-                    source_node_id, task.task_id
-                );
-                store
-                    .mark_task_failed(task.task_id, task.attempts + 1)
-                    .await?;
-                return Ok(());
-            }
-        };
-
-        let target_node = match node_map.get(&target_node_id) {
-            Some(n) => n,
-            None => {
-                warn!(
-                    "target node {} not found, failing task {}",
-                    target_node_id, task.task_id
-                );
-                store
-                    .mark_task_failed(task.task_id, task.attempts + 1)
-                    .await?;
-                return Ok(());
-            }
+        let Some(target_node) = node_map.get(&target_node_id) else {
+            warn!(
+                "target node {} not found, failing task {}",
+                target_node_id, task.task_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
         };
 
         // Get chunk metadata (SHA-256, size) from the chunks table.
-        let chunk_row = store.get_chunk(chunk_id).await?;
-        let Some(chunk_row) = chunk_row else {
+        let Some(chunk_row) = store.get_chunk(chunk_id).await? else {
             warn!(
                 "chunk {chunk_id} not found in metadata, failing task {}",
                 task.task_id
@@ -319,49 +320,52 @@ impl Coordinator {
             return Ok(());
         };
 
-        // Connect to source node and retrieve chunk data via streaming gRPC.
-        let source_addr = format!("http://{}", source_node.grpc_addr);
-        let mut source_client = ChunkServiceClient::connect(source_addr).await?;
-
-        let retrieve_req = RetrieveChunkRequest {
-            chunk_id: chunk_id.to_string(),
-            expected_sha256: chunk_row.sha256_hex.clone(),
-        };
-
-        let mut retrieve_stream = source_client
-            .retrieve_chunk(tonic::Request::new(retrieve_req))
+        // The recorded source may have died since the task was created. Build
+        // an ordered candidate list: the recorded source first (if still
+        // healthy), then every other healthy durable replica of the chunk.
+        let replicas = store.replicas_for_chunk(chunk_id).await?;
+        let healthy: std::collections::HashSet<Uuid> = store
+            .healthy_nodes()
             .await?
-            .into_inner();
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        let candidates = source_candidates(preferred_source, &replicas, &healthy, target_node_id);
 
-        // Collect chunk data from the source node.
-        let mut chunk_data = Vec::new();
-        while let Some(frame) = retrieve_stream.message().await? {
-            match frame.payload {
-                Some(proto::storage::retrieve_chunk_response::Payload::Meta(_m)) => {}
-                Some(proto::storage::retrieve_chunk_response::Payload::Data(data)) => {
-                    chunk_data.extend_from_slice(&data);
+        let mut chunk_data = None;
+        for source_node_id in candidates {
+            let Some(source_node) = node_map.get(&source_node_id) else {
+                warn!("source node {source_node_id} has a replica but no node row; skipping");
+                continue;
+            };
+            match Self::retrieve_verified_chunk(source_node, chunk_id, &chunk_row.sha256_hex).await
+            {
+                Ok(data) => {
+                    if preferred_source != Some(source_node_id) {
+                        info!(
+                            "recovery task {} using alternate source {source_node_id}",
+                            task.task_id
+                        );
+                    }
+                    chunk_data = Some(data);
+                    break;
                 }
-                None => {}
+                Err(e) => warn!(
+                    "source node {source_node_id} failed for chunk {chunk_id}: {e}; trying another replica"
+                ),
             }
         }
 
-        // Verify SHA-256 of retrieved data.
-        let actual_hash: String = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(&chunk_data);
-            hex::encode(hasher.finalize())
-        };
-        if actual_hash != chunk_row.sha256_hex {
+        let Some(chunk_data) = chunk_data else {
             warn!(
-                "chunk {chunk_id} hash mismatch from source {}: expected {} got {}",
-                source_node_id, chunk_row.sha256_hex, actual_hash
+                "no usable source replica for chunk {chunk_id}, failing task {}",
+                task.task_id
             );
             store
                 .mark_task_failed(task.task_id, task.attempts + 1)
                 .await?;
             return Ok(());
-        }
+        };
 
         // Connect to target node and push chunk data via streaming gRPC.
         let target_addr = format!("http://{}", target_node.grpc_addr);
@@ -417,6 +421,50 @@ impl Coordinator {
         );
 
         Ok(())
+    }
+
+    /// Fetch a chunk from one source replica and verify its SHA-256 before
+    /// using it. Returns an error so the caller can try the next replica.
+    async fn retrieve_verified_chunk(
+        source_node: &StorageNodeRow,
+        chunk_id: Uuid,
+        expected_sha256: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let source_addr = format!("http://{}", source_node.grpc_addr);
+        let mut source_client = ChunkServiceClient::connect(source_addr).await?;
+
+        let retrieve_req = RetrieveChunkRequest {
+            chunk_id: chunk_id.to_string(),
+            expected_sha256: expected_sha256.to_string(),
+        };
+        let mut retrieve_stream = source_client
+            .retrieve_chunk(tonic::Request::new(retrieve_req))
+            .await?
+            .into_inner();
+
+        let mut chunk_data = Vec::new();
+        while let Some(frame) = retrieve_stream.message().await? {
+            match frame.payload {
+                Some(proto::storage::retrieve_chunk_response::Payload::Meta(_)) => {}
+                Some(proto::storage::retrieve_chunk_response::Payload::Data(data)) => {
+                    chunk_data.extend_from_slice(&data);
+                }
+                None => {}
+            }
+        }
+
+        let actual_hash: String = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&chunk_data);
+            hex::encode(hasher.finalize())
+        };
+        if actual_hash != expected_sha256 {
+            return Err(
+                format!("hash mismatch: expected {expected_sha256} got {actual_hash}").into(),
+            );
+        }
+        Ok(chunk_data)
     }
 
     #[allow(dead_code)]
@@ -1133,9 +1181,21 @@ impl CoordinatorServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_file_cursor, encode_file_cursor};
+    use super::{decode_file_cursor, encode_file_cursor, source_candidates};
     use chrono::{TimeZone, Utc};
+    use metadata::models::ChunkReplicaRow;
+    use std::collections::HashSet;
     use uuid::Uuid;
+
+    fn replica(node_id: Uuid, durable: bool) -> ChunkReplicaRow {
+        ChunkReplicaRow {
+            replica_id: Uuid::new_v4(),
+            chunk_id: Uuid::new_v4(),
+            node_id,
+            durable,
+            created_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn file_cursor_roundtrips() {
@@ -1161,5 +1221,43 @@ mod tests {
             let err = decode_file_cursor(cursor).expect_err("invalid cursor");
             assert_eq!(err.code(), tonic::Code::InvalidArgument);
         }
+    }
+
+    #[test]
+    fn source_candidates_prefers_recorded_source() {
+        let source = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let healthy: HashSet<Uuid> = [source, other, target].into_iter().collect();
+        let replicas = vec![replica(other, true), replica(source, true)];
+
+        assert_eq!(
+            source_candidates(Some(source), &replicas, &healthy, target),
+            vec![source, other]
+        );
+    }
+
+    #[test]
+    fn source_candidates_falls_back_when_recorded_source_unhealthy() {
+        let dead = Uuid::new_v4();
+        let live = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let healthy: HashSet<Uuid> = [live, target].into_iter().collect();
+        let replicas = vec![replica(dead, true), replica(live, true)];
+
+        assert_eq!(
+            source_candidates(Some(dead), &replicas, &healthy, target),
+            vec![live]
+        );
+    }
+
+    #[test]
+    fn source_candidates_excludes_target_and_non_durable_replicas() {
+        let live = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let healthy: HashSet<Uuid> = [live, target].into_iter().collect();
+        let replicas = vec![replica(target, true), replica(live, false)];
+
+        assert!(source_candidates(None, &replicas, &healthy, target).is_empty());
     }
 }
