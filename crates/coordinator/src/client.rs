@@ -5,7 +5,7 @@
 
 use proto::storage::{
     ChunkManifest, CompleteUploadRequest, CreateUploadSessionRequest, DeleteFileRequest,
-    GetChunkPlanRequest, GetManifestRequest, GetStatsRequest, ListNodesRequest,
+    GetChunkPlanRequest, GetManifestRequest, GetStatsRequest, ListFilesRequest, ListNodesRequest,
     cluster_service_client::ClusterServiceClient,
 };
 use tonic::transport::Channel;
@@ -158,6 +158,33 @@ impl CoordinatorClient {
                 )
             })
             .collect())
+    }
+
+    /// List committed files newest-first. Pass an empty cursor for the first
+    /// page and the returned `next_cursor` for subsequent pages.
+    pub async fn list_files(
+        &mut self,
+        limit: i32,
+        cursor: String,
+    ) -> Result<crate::types::FileList, Box<dyn std::error::Error + Send + Sync>> {
+        let req = request_with_id(ListFilesRequest { limit, cursor });
+        let resp = self.inner.list_files(req).await?.into_inner();
+        Ok(crate::types::FileList {
+            files: resp
+                .files
+                .into_iter()
+                .map(|f| crate::types::FileSummaryEntry {
+                    file_id: Uuid::parse_str(&f.file_id).unwrap_or(Uuid::nil()),
+                    filename: f.filename,
+                    total_size: f.total_size,
+                    chunk_count: i32::try_from(f.chunk_count).unwrap_or(i32::MAX),
+                    replication_factor: f.replication_factor,
+                    status: f.status,
+                    created_epoch_ms: f.created_epoch_ms,
+                })
+                .collect(),
+            next_cursor: (!resp.next_cursor.is_empty()).then_some(resp.next_cursor),
+        })
     }
 
     pub async fn list_nodes(

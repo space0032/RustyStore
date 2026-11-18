@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS files (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Newest-first listing of committed files (keyset pagination).
+CREATE INDEX IF NOT EXISTS idx_files_status_created
+  ON files(status, created_at DESC, file_id DESC);
+
 -- chunks (content-addressed)
 CREATE TABLE IF NOT EXISTS chunks (
   chunk_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),

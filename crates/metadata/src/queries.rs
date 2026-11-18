@@ -303,6 +303,49 @@ impl MetadataStore {
         Ok(row)
     }
 
+    /// List committed files newest-first using keyset pagination.
+    ///
+    /// `after` is `(created_at, file_id)` from the last row of the previous
+    /// page; pass `None` for the first page. Ordering includes the id so files
+    /// created in the same instant paginate deterministically.
+    pub async fn list_files(
+        &self,
+        limit: i64,
+        after: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+    ) -> sqlx::Result<Vec<FileRow>> {
+        match after {
+            Some((created_at, file_id)) => {
+                sqlx::query_as::<_, FileRow>(
+                    r#"
+                    SELECT * FROM files
+                    WHERE status = 'committed'
+                      AND (created_at, file_id) < ($1, $2)
+                    ORDER BY created_at DESC, file_id DESC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(created_at)
+                .bind(file_id)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_as::<_, FileRow>(
+                    r#"
+                    SELECT * FROM files
+                    WHERE status = 'committed'
+                    ORDER BY created_at DESC, file_id DESC
+                    LIMIT $1
+                    "#,
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+    }
+
     // ---- chunks ----------------------------------------------------------
 
     pub async fn insert_chunk(

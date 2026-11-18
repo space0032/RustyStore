@@ -14,11 +14,11 @@ use metadata::{MetadataStore, ReplicationTaskRow};
 use proto::storage::{
     CapacityReport, ChunkLocation, ChunkReference, CompleteUploadRequest, CompleteUploadResponse,
     CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse,
-    Empty, GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
-    GetStatsRequest, GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest,
-    HeartbeatResponse, ListNodesRequest, ListNodesResponse, NodeInfo, RegisterRequest,
-    RegisterResponse, ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest,
-    StoreChunkRequest,
+    Empty, FileSummary, GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest,
+    GetManifestResponse, GetStatsRequest, GetStatsResponse, HealthCheckRequest,
+    HealthCheckResponse, HeartbeatRequest, HeartbeatResponse, ListFilesRequest, ListFilesResponse,
+    ListNodesRequest, ListNodesResponse, NodeInfo, RegisterRequest, RegisterResponse,
+    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, StoreChunkRequest,
     chunk_service_client::ChunkServiceClient,
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::NodeService,
@@ -34,6 +34,27 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
+
+const DEFAULT_LIST_LIMIT: i32 = 50;
+const MAX_LIST_LIMIT: i32 = 200;
+
+/// Opaque keyset cursor: `<created_at_micros>:<file_id>`.
+fn encode_file_cursor(created_at: chrono::DateTime<chrono::Utc>, file_id: Uuid) -> String {
+    format!("{}:{}", created_at.timestamp_micros(), file_id)
+}
+
+#[allow(clippy::result_large_err)] // tonic::Status is the natural gRPC error here
+fn decode_file_cursor(cursor: &str) -> Result<(i64, Uuid), Status> {
+    let (micros, file_id) = cursor
+        .split_once(':')
+        .ok_or_else(|| Status::invalid_argument("invalid cursor"))?;
+    let micros = micros
+        .parse::<i64>()
+        .map_err(|_| Status::invalid_argument("invalid cursor"))?;
+    let file_id =
+        Uuid::parse_str(file_id).map_err(|_| Status::invalid_argument("invalid cursor"))?;
+    Ok((micros, file_id))
+}
 
 /// The Coordinator: gRPC service + background recovery tasks.
 pub struct Coordinator {
@@ -996,6 +1017,59 @@ impl ClusterService for CoordinatorService {
         Err(Status::unimplemented("node_heartbeat not yet implemented"))
     }
 
+    async fn list_files(
+        &self,
+        request: Request<ListFilesRequest>,
+    ) -> Result<Response<ListFilesResponse>, Status> {
+        let req = request.into_inner();
+        let limit = if req.limit <= 0 {
+            DEFAULT_LIST_LIMIT
+        } else {
+            req.limit.min(MAX_LIST_LIMIT)
+        };
+        let after = if req.cursor.is_empty() {
+            None
+        } else {
+            let (created_micros, file_id) = decode_file_cursor(&req.cursor)?;
+            let created_at = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(created_micros)
+                .ok_or_else(|| Status::invalid_argument("invalid cursor"))?;
+            Some((created_at, file_id))
+        };
+
+        // Fetch one extra row so we know whether a next page exists.
+        let rows = self
+            .store
+            .list_files(i64::from(limit) + 1, after)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let take = limit as usize;
+        let has_more = rows.len() > take;
+        let files: Vec<FileSummary> = rows
+            .iter()
+            .take(take)
+            .map(|f| FileSummary {
+                file_id: f.file_id.to_string(),
+                filename: f.filename.clone(),
+                total_size: f.total_size,
+                chunk_count: i64::from(f.chunk_count),
+                replication_factor: f.replication_factor,
+                status: f.status.clone(),
+                created_epoch_ms: f.created_at.timestamp_millis(),
+            })
+            .collect();
+
+        let next_cursor = if has_more {
+            rows.get(take - 1)
+                .map(|f| encode_file_cursor(f.created_at, f.file_id))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        Ok(Response::new(ListFilesResponse { files, next_cursor }))
+    }
+
     async fn list_nodes(
         &self,
         _request: Request<ListNodesRequest>,
@@ -1054,5 +1128,38 @@ impl CoordinatorServer {
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_file_cursor, encode_file_cursor};
+    use chrono::{TimeZone, Utc};
+    use uuid::Uuid;
+
+    #[test]
+    fn file_cursor_roundtrips() {
+        let created = Utc
+            .timestamp_micros(1_700_000_000_123_456)
+            .single()
+            .expect("timestamp");
+        let file_id = Uuid::new_v4();
+        let cursor = encode_file_cursor(created, file_id);
+        assert_eq!(
+            decode_file_cursor(&cursor).expect("valid cursor"),
+            (created.timestamp_micros(), file_id)
+        );
+    }
+
+    #[test]
+    fn file_cursor_rejects_garbage() {
+        for cursor in [
+            "missing-separator",
+            "not-a-number:00000000-0000-0000-0000-000000000000",
+            "123:not-a-uuid",
+        ] {
+            let err = decode_file_cursor(cursor).expect_err("invalid cursor");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        }
     }
 }

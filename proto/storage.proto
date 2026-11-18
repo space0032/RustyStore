@@ -162,6 +162,7 @@ service ClusterService {
   rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
   rpc GetManifest(GetManifestRequest) returns (GetManifestResponse);
   rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
 }
@@ -248,6 +249,29 @@ message DeleteFileRequest {
 message DeleteFileResponse {
   bool deleted = 1;
   repeated ChunkLocation chunks = 2;
+}
+
+// Newest-first keyset pagination over committed files. `cursor` is opaque; an
+// empty cursor starts at the newest file. `limit` 0 means the server default.
+message ListFilesRequest {
+  int32 limit = 1;
+  string cursor = 2;
+}
+
+message FileSummary {
+  string file_id = 1;
+  string filename = 2;
+  int64 total_size = 3;
+  int64 chunk_count = 4;
+  int32 replication_factor = 5;
+  string status = 6;
+  int64 created_epoch_ms = 7;
+}
+
+message ListFilesResponse {
+  repeated FileSummary files = 1;
+  // Empty when there are no more pages.
+  string next_cursor = 2;
 }
 
 message ListNodesRequest {}

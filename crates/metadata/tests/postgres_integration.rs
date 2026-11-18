@@ -258,6 +258,86 @@ async fn claim_replication_task_marks_in_progress_once() {
 }
 
 #[tokio::test]
+async fn list_files_paginates_newest_first_and_hides_uploads() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+
+    // Five committed files with deterministic, strictly increasing times.
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let file_id = Uuid::new_v4();
+        store
+            .create_file(file_id, &format!("f{i}.bin"), 10, 4, 3, 1)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE files SET status='committed', created_at=to_timestamp($2) WHERE file_id=$1",
+        )
+        .bind(file_id)
+        .bind(1_700_000_000.0 + i as f64)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        ids.push(file_id);
+    }
+
+    // An in-progress upload must not appear.
+    let draft = Uuid::new_v4();
+    store
+        .create_file(draft, "draft.bin", 10, 4, 3, 1)
+        .await
+        .unwrap();
+
+    let page1 = store.list_files(2, None).await.unwrap();
+    assert_eq!(
+        page1
+            .iter()
+            .map(|f| f.filename.as_str())
+            .collect::<Vec<_>>(),
+        vec!["f4.bin", "f3.bin"]
+    );
+
+    let cursor1 = (page1[1].created_at, page1[1].file_id);
+    let page2 = store.list_files(2, Some(cursor1)).await.unwrap();
+    assert_eq!(
+        page2
+            .iter()
+            .map(|f| f.filename.as_str())
+            .collect::<Vec<_>>(),
+        vec!["f2.bin", "f1.bin"]
+    );
+
+    let cursor2 = (page2[1].created_at, page2[1].file_id);
+    let page3 = store.list_files(2, Some(cursor2)).await.unwrap();
+    assert_eq!(
+        page3
+            .iter()
+            .map(|f| f.filename.as_str())
+            .collect::<Vec<_>>(),
+        vec!["f0.bin"]
+    );
+
+    // No duplicates or gaps across the three pages.
+    let mut seen: Vec<Uuid> = page1
+        .iter()
+        .chain(&page2)
+        .chain(&page3)
+        .map(|f| f.file_id)
+        .collect();
+    let total = seen.len();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(total, 5);
+    assert_eq!(seen.len(), 5);
+    assert!(seen.iter().all(|id| ids.contains(id)));
+
+    // An empty page past the end is not an error.
+    let cursor3 = (page3[0].created_at, page3[0].file_id);
+    assert!(store.list_files(2, Some(cursor3)).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn existing_chunk_ids_and_stale_upload_reaping() {
     let Some((store, _guard)) = setup().await else {
         return;

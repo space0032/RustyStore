@@ -22,10 +22,11 @@ use uuid::Uuid;
 use proto::storage::cluster_service_server::{ClusterService, ClusterServiceServer};
 use proto::storage::{
     ChunkLocation, CompleteUploadRequest, CompleteUploadResponse, CreateUploadSessionRequest,
-    CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse, GetChunkPlanRequest,
-    GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
-    GetStatsResponse, HeartbeatRequest, HeartbeatResponse, ListNodesRequest, ListNodesResponse,
-    NodeInfo, ReplicateChunkRequest, ReplicateChunkResponse,
+    CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse, FileSummary,
+    GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
+    GetStatsRequest, GetStatsResponse, HeartbeatRequest, HeartbeatResponse, ListFilesRequest,
+    ListFilesResponse, ListNodesRequest, ListNodesResponse, NodeInfo, ReplicateChunkRequest,
+    ReplicateChunkResponse,
 };
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
@@ -242,6 +243,39 @@ impl ClusterService for FakeCoordinator {
         Err(Status::unimplemented("node_heartbeat"))
     }
 
+    async fn list_files(
+        &self,
+        request: GrpcRequest<ListFilesRequest>,
+    ) -> Result<GrpcResponse<ListFilesResponse>, Status> {
+        self.record_request_id(&request).await;
+        let req = request.into_inner();
+        let limit = if req.limit <= 0 {
+            50
+        } else {
+            req.limit.min(200)
+        } as usize;
+        let state = self.state.lock().await;
+        let mut files: Vec<FileSummary> = state
+            .files
+            .values()
+            .map(|f| FileSummary {
+                file_id: f.upload.file_id.to_string(),
+                filename: f.upload.filename.clone(),
+                total_size: f.upload.total_size,
+                chunk_count: f.chunks.len() as i64,
+                replication_factor: f.upload.replication_factor,
+                status: "committed".to_string(),
+                created_epoch_ms: 0,
+            })
+            .collect();
+        files.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+        files.truncate(limit);
+        Ok(GrpcResponse::new(ListFilesResponse {
+            files,
+            next_cursor: String::new(),
+        }))
+    }
+
     async fn list_nodes(
         &self,
         request: GrpcRequest<ListNodesRequest>,
@@ -360,6 +394,37 @@ async fn upload_then_download_roundtrip() {
     assert_eq!(json["replication_factor"].as_i64(), Some(2));
     assert_eq!(json["chunk_size"].as_i64(), Some(FAKE_CHUNK_SIZE));
     let file_id = json["file_id"].as_str().expect("file_id").to_string();
+
+    // Listing is newest-first and returns the uploaded file.
+    let list_req = Request::builder()
+        .uri("/api/v1/files?limit=10")
+        .header(common::request_id::HEADER, REQUEST_ID)
+        .body(Body::empty())
+        .expect("list request");
+    let list_resp = app.clone().oneshot(list_req).await.expect("list");
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+        .await
+        .expect("list body");
+    let list_json: serde_json::Value =
+        serde_json::from_slice(&list_body).expect("list response json");
+    assert_eq!(
+        list_json["files"][0]["file_id"].as_str(),
+        Some(file_id.as_str())
+    );
+    assert_eq!(list_json["files"][0]["status"], "committed");
+    assert!(
+        list_json.get("next_cursor").is_none(),
+        "a single page has no next cursor"
+    );
+
+    // Invalid page sizes are rejected before reaching the coordinator.
+    let bad_list_req = Request::builder()
+        .uri("/api/v1/files?limit=0")
+        .body(Body::empty())
+        .expect("bad list request");
+    let bad_list_resp = app.clone().oneshot(bad_list_req).await.expect("bad list");
+    assert_eq!(bad_list_resp.status(), StatusCode::BAD_REQUEST);
 
     let download_req = Request::builder()
         .uri(format!("/api/v1/files/{file_id}/download"))

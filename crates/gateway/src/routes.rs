@@ -1,9 +1,6 @@
 //! API route definitions.
 
-use axum::{
-    Router,
-    routing::{get, post},
-};
+use axum::{Router, routing::get};
 use std::sync::Arc;
 
 use crate::AppState;
@@ -16,7 +13,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/v1/ready", get(health::ready))
         .route("/metrics", get(health::metrics))
         // File operations
-        .route("/api/v1/files", post(upload::upload_file))
+        .route(
+            "/api/v1/files",
+            get(files::list_files).post(upload::upload_file),
+        )
         .route(
             "/api/v1/files/:file_id",
             get(files::get_file).delete(files::delete_file),

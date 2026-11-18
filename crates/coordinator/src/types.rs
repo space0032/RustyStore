@@ -57,3 +57,22 @@ pub struct ClusterStats {
     pub total_chunks: i64,
     pub under_replicated_chunks: i64,
 }
+
+/// A committed file summary returned by paginated listing.
+#[derive(Clone, Debug)]
+pub struct FileSummaryEntry {
+    pub file_id: Uuid,
+    pub filename: String,
+    pub total_size: i64,
+    pub chunk_count: i32,
+    pub replication_factor: i32,
+    pub status: String,
+    pub created_epoch_ms: i64,
+}
+
+/// One page of committed files. `next_cursor` is `None` on the last page.
+#[derive(Clone, Debug)]
+pub struct FileList {
+    pub files: Vec<FileSummaryEntry>,
+    pub next_cursor: Option<String>,
+}

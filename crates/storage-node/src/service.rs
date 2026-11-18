@@ -12,9 +12,9 @@ use proto::storage::{
     DeleteChunkResponse, DeleteFileRequest, DeleteFileResponse, Empty, GetChunkPlanRequest,
     GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
     GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, HeartbeatResponse,
-    ListChunksRequest, ListNodesRequest, ListNodesResponse, RegisterRequest, RegisterResponse,
-    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, RetrieveChunkResponse,
-    StoreChunkRequest, StoreChunkResponse,
+    ListChunksRequest, ListFilesRequest, ListFilesResponse, ListNodesRequest, ListNodesResponse,
+    RegisterRequest, RegisterResponse, ReplicateChunkRequest, ReplicateChunkResponse,
+    RetrieveChunkRequest, RetrieveChunkResponse, StoreChunkRequest, StoreChunkResponse,
     chunk_service_server::{ChunkService, ChunkServiceServer},
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::{NodeService, NodeServiceServer},
@@ -297,6 +297,13 @@ impl ClusterService for StorageNodeService {
         _request: Request<DeleteFileRequest>,
     ) -> Result<Response<DeleteFileResponse>, Status> {
         Err(Status::unimplemented("delete_file not yet implemented"))
+    }
+
+    async fn list_files(
+        &self,
+        _request: Request<ListFilesRequest>,
+    ) -> Result<Response<ListFilesResponse>, Status> {
+        Err(Status::unimplemented("list_files not yet implemented"))
     }
 
     async fn node_heartbeat(
