@@ -44,6 +44,34 @@ impl MetadataStore {
             .map(|_| ())
     }
 
+    // ---- coordinator leadership -----------------------------------------
+
+    /// Try to acquire or renew the coordinator leadership lease.
+    ///
+    /// Returns `true` when `leader_id` holds the lease after this call. A
+    /// different coordinator may take over only after the previous lease
+    /// expires, so at most one coordinator runs background work at a time.
+    pub async fn try_acquire_leadership(&self, leader_id: Uuid, ttl_ms: i64) -> sqlx::Result<bool> {
+        let row: Option<(Uuid,)> = sqlx::query_as(
+            r#"
+            INSERT INTO coordinator_leader (singleton, leader_id, lease_expiry, updated_at)
+            VALUES (TRUE, $1, now() + ($2 * INTERVAL '1 millisecond'), now())
+            ON CONFLICT (singleton) DO UPDATE SET
+              leader_id = EXCLUDED.leader_id,
+              lease_expiry = EXCLUDED.lease_expiry,
+              updated_at = now()
+            WHERE coordinator_leader.leader_id = EXCLUDED.leader_id
+               OR coordinator_leader.lease_expiry <= now()
+            RETURNING leader_id
+            "#,
+        )
+        .bind(leader_id)
+        .bind(ttl_ms)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some_and(|(id,)| id == leader_id))
+    }
+
     // ---- nodes -----------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]

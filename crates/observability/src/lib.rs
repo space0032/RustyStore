@@ -37,6 +37,14 @@ pub static UNDER_REPLICATED_CHUNKS: Lazy<IntGauge> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static COORDINATOR_IS_LEADER: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::new(
+        "rustystore_coordinator_is_leader",
+        "Whether this coordinator holds the background-work lease (1 = leader)",
+    )
+    .unwrap()
+});
+
 pub static STORAGE_CHUNKS_STORED: Lazy<IntCounter> = Lazy::new(|| {
     IntCounter::new(
         "rustystore_storage_chunks_stored_total",
@@ -110,6 +118,7 @@ pub fn register_metrics() -> Result<(), Box<dyn std::error::Error>> {
     register(UPLOAD_FAILURES.clone())?;
     register(ACTIVE_NODES.clone())?;
     register(UNDER_REPLICATED_CHUNKS.clone())?;
+    register(COORDINATOR_IS_LEADER.clone())?;
     register(STORAGE_CHUNKS_STORED.clone())?;
     register(STORAGE_BYTES_STORED.clone())?;
     register(STORAGE_CHUNKS_DELETED.clone())?;
@@ -145,6 +154,7 @@ mod tests {
         UPLOADED_BYTES.inc();
         DOWNLOADED_BYTES.inc();
         ACTIVE_NODES.set(1);
+        COORDINATOR_IS_LEADER.set(1);
         STORAGE_CHUNKS_STORED.inc();
         STORAGE_BYTES_STORED.inc_by(16);
         STORAGE_CHUNKS_DELETED.inc();
@@ -156,6 +166,7 @@ mod tests {
         assert!(text.contains("rustystore_uploaded_bytes_total"), "{text}");
         assert!(text.contains("rustystore_downloaded_bytes_total"), "{text}");
         assert!(text.contains("rustystore_active_storage_nodes"), "{text}");
+        assert!(text.contains("rustystore_coordinator_is_leader"), "{text}");
         assert!(
             text.contains("rustystore_storage_chunks_stored_total"),
             "{text}"

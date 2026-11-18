@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use coordinator::CoordinatorClient;
 
 pub struct AppState {
-    pub coordinator_addr: String,
+    pub coordinator_addrs: Vec<String>,
     pub coordinator_client: Mutex<Option<CoordinatorClient>>,
     /// Maximum accepted upload size in bytes; `0` means unlimited.
     pub max_upload_bytes: u64,
@@ -13,8 +13,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(coordinator_addr: &str) -> Self {
+        Self::with_coordinator_addrs(vec![coordinator_addr.to_string()])
+    }
+
+    pub fn with_coordinator_addrs(coordinator_addrs: Vec<String>) -> Self {
         Self {
-            coordinator_addr: coordinator_addr.to_string(),
+            coordinator_addrs,
             coordinator_client: Mutex::new(None),
             max_upload_bytes: 0,
         }
@@ -29,7 +33,7 @@ impl AppState {
     pub async fn coord_client(&self) -> Result<CoordinatorClient, crate::error::GatewayError> {
         let mut guard = self.coordinator_client.lock().await;
         if guard.is_none() {
-            let client = CoordinatorClient::connect(&self.coordinator_addr)
+            let client = CoordinatorClient::connect_many(&self.coordinator_addrs)
                 .await
                 .map_err(|e| crate::error::GatewayError::Grpc(e.to_string()))?;
             *guard = Some(client);
@@ -41,7 +45,7 @@ impl AppState {
 impl Clone for AppState {
     fn clone(&self) -> Self {
         Self {
-            coordinator_addr: self.coordinator_addr.clone(),
+            coordinator_addrs: self.coordinator_addrs.clone(),
             coordinator_client: Mutex::new(None),
             max_upload_bytes: self.max_upload_bytes,
         }

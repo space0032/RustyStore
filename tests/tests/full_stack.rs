@@ -110,7 +110,7 @@ async fn start_stack(replication_factor: i32, node_count: usize) -> Option<TestS
         .await
         .expect("connect database");
     sqlx::raw_sql(
-        "TRUNCATE replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
+        "TRUNCATE coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
     )
     .execute(&pool)
     .await
@@ -540,5 +540,84 @@ async fn recovery_replaces_a_failed_replica() {
     assert_eq!(source, Some(surviving_source), "actual source persisted");
     assert_eq!(target, spare, "actual target persisted");
 
+    stack.shutdown().await;
+}
+
+#[tokio::test]
+async fn gateway_fails_over_between_coordinators() {
+    let Some(_guard) = database_url().map(|_| db_lock().lock()) else {
+        return;
+    };
+    let _guard = _guard.await;
+    let Some(mut stack) = start_stack(1, 0).await else {
+        return;
+    };
+
+    let url = database_url().expect("database url");
+    let second_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind second coordinator");
+    let second_addr = format!(
+        "http://{}",
+        second_listener
+            .local_addr()
+            .expect("second coordinator addr")
+    );
+    let (second_shutdown, second_rx) = tokio::sync::oneshot::channel();
+    let second_store = Arc::new(
+        MetadataStore::connect_and_migrate(&url)
+            .await
+            .expect("second coordinator store"),
+    );
+    let second_task = tokio::spawn(async move {
+        let _ = CoordinatorServer::serve_with_listener(
+            second_listener,
+            second_store,
+            1,
+            CHUNK_SIZE,
+            async move {
+                let _ = second_rx.await;
+            },
+        )
+        .await;
+    });
+    wait_for_coordinator(&second_addr).await;
+
+    let app = gateway::router(Arc::new(gateway::AppState::with_coordinator_addrs(vec![
+        stack.coord_addr.clone(),
+        second_addr,
+    ])));
+
+    let first_request = Request::builder()
+        .uri("/api/v1/files")
+        .body(Body::empty())
+        .expect("first list request");
+    let response = app
+        .clone()
+        .oneshot(first_request)
+        .await
+        .expect("first list");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    if let Some(tx) = stack.coord_shutdown.take() {
+        let _ = tx.send(());
+    }
+    if let Some(task) = stack.coord_task.take() {
+        let _ = task.await;
+    }
+
+    let failover_request = Request::builder()
+        .uri("/api/v1/files")
+        .body(Body::empty())
+        .expect("failover list request");
+    let response = app.oneshot(failover_request).await.expect("failover list");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "gateway should retry against the standby coordinator"
+    );
+
+    let _ = second_shutdown.send(());
+    let _ = second_task.await;
     stack.shutdown().await;
 }

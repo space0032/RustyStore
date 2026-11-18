@@ -32,10 +32,13 @@ use tracing::info;
 
 pub async fn run(
     addr: SocketAddr,
-    coordinator_addr: String,
+    coordinator_addrs: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let max_upload_bytes: u64 = common::config::parse_env("MAX_UPLOAD_BYTES", 0)?;
-    let state = Arc::new(AppState::new(&coordinator_addr).with_max_upload_bytes(max_upload_bytes));
+    let state = Arc::new(
+        AppState::with_coordinator_addrs(coordinator_addrs.clone())
+            .with_max_upload_bytes(max_upload_bytes),
+    );
 
     // Register Prometheus collectors (idempotent).
     observability::register_metrics()?;
@@ -63,7 +66,10 @@ pub async fn run(
                 )),
         );
 
-    info!("gateway listening on {addr}, coordinator at {coordinator_addr}");
+    info!(
+        "gateway listening on {addr}, coordinators at {}",
+        coordinator_addrs.join(", ")
+    );
     info!(
         "auth: {}",
         if auth_config.require_auth {
@@ -122,14 +128,70 @@ pub(crate) fn grpc_endpoint(addr: &str) -> String {
     }
 }
 
+/// Parse `COORDINATOR_ADDRS` (comma-separated) with `COORDINATOR_ADDR` as the
+/// single-address fallback. Empty entries are ignored; an all-empty value is
+/// a startup error.
+pub fn parse_coordinator_addrs(
+    raw: &str,
+    fallback: &str,
+) -> Result<Vec<String>, common::config::ConfigError> {
+    let source = if raw.trim().is_empty() { fallback } else { raw };
+    let addrs: Vec<String> = source
+        .split(',')
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty())
+        .map(grpc_endpoint)
+        .collect();
+    if addrs.is_empty() {
+        return Err(common::config::ConfigError::Empty {
+            key: "COORDINATOR_ADDRS".to_string(),
+        });
+    }
+    Ok(addrs)
+}
+
+/// Read the coordinator address list from the environment.
+pub fn coordinator_addrs_from_env() -> Result<Vec<String>, common::config::ConfigError> {
+    let raw = common::config::env_string("COORDINATOR_ADDRS", "");
+    let fallback = common::config::env_string("COORDINATOR_ADDR", "127.0.0.1:50051");
+    parse_coordinator_addrs(&raw, &fallback)
+}
+
 #[cfg(test)]
 mod endpoint_tests {
-    use super::grpc_endpoint;
+    use super::{grpc_endpoint, parse_coordinator_addrs};
 
     #[test]
     fn adds_scheme_only_when_missing() {
         assert_eq!(grpc_endpoint("node:50051"), "http://node:50051");
         assert_eq!(grpc_endpoint("http://node:50051"), "http://node:50051");
         assert_eq!(grpc_endpoint("https://node:50051"), "https://node:50051");
+    }
+
+    #[test]
+    fn parses_multiple_coordinators_and_normalizes_schemes() {
+        let addrs =
+            parse_coordinator_addrs(" coordinator-1:50051, http://coordinator-2:50051 ", "")
+                .unwrap();
+        assert_eq!(
+            addrs,
+            vec![
+                "http://coordinator-1:50051".to_string(),
+                "http://coordinator-2:50051".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_single_coordinator_addr() {
+        assert_eq!(
+            parse_coordinator_addrs("", "coordinator:50051").unwrap(),
+            vec!["http://coordinator:50051".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_address_list() {
+        assert!(parse_coordinator_addrs(" , ", "").is_err());
     }
 }

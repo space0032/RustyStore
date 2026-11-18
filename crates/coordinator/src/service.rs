@@ -28,6 +28,7 @@ use proto::storage::{
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tonic::{Request, Response, Status, Streaming};
@@ -38,6 +39,12 @@ type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
 const DEFAULT_LIST_LIMIT: i32 = 50;
 const MAX_LIST_LIMIT: i32 = 200;
+
+/// How often a coordinator renews its leadership lease.
+const LEADERSHIP_RENEW_INTERVAL: Duration = Duration::from_secs(5);
+/// Lease duration; a crashed coordinator's background work stops within this
+/// window after the process dies.
+const LEADERSHIP_LEASE_MS: i64 = 15_000;
 
 /// Delay needed to transfer `bytes` at the configured rate, if any.
 fn throttle_delay(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) -> Option<Duration> {
@@ -142,6 +149,8 @@ fn target_candidates(
 pub struct Coordinator {
     service: CoordinatorService,
     #[allow(dead_code)]
+    leadership_handle: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
     lease_monitor_handle: Option<JoinHandle<()>>,
     #[allow(dead_code)]
     replication_monitor_handle: Option<JoinHandle<()>>,
@@ -160,16 +169,61 @@ impl Coordinator {
         recovery_bandwidth_bytes_per_sec: Option<u64>,
     ) -> Self {
         let service = CoordinatorService::new(store.clone(), replication_factor, chunk_size_bytes);
+        let is_leader = Arc::new(AtomicBool::new(false));
+
+        // Leadership: only the coordinator holding the database lease runs
+        // background work. Every coordinator can serve gateway RPCs, so the
+        // gateway can fail over to a standby without waiting for a lease.
+        let leadership = {
+            let store = store.clone();
+            let is_leader = is_leader.clone();
+            let leader_id = Uuid::new_v4();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(LEADERSHIP_RENEW_INTERVAL);
+                let mut was_leader = false;
+                loop {
+                    interval.tick().await;
+                    match store
+                        .try_acquire_leadership(leader_id, LEADERSHIP_LEASE_MS)
+                        .await
+                    {
+                        Ok(leader) => {
+                            is_leader.store(leader, Ordering::Relaxed);
+                            observability::COORDINATOR_IS_LEADER.set(i64::from(leader));
+                            if leader != was_leader {
+                                if leader {
+                                    info!("coordinator {leader_id} acquired leadership");
+                                } else {
+                                    info!("coordinator {leader_id} is a standby");
+                                }
+                                was_leader = leader;
+                            }
+                        }
+                        Err(e) => {
+                            is_leader.store(false, Ordering::Relaxed);
+                            observability::COORDINATOR_IS_LEADER.set(0);
+                            if was_leader {
+                                warn!("lost coordinator leadership: {e}");
+                                was_leader = false;
+                            }
+                        }
+                    }
+                }
+            })
+        };
 
         // Lease expiry monitor: marks nodes unhealthy when lease expires.
         let lease_monitor = {
             let store = store.clone();
+            let is_leader = is_leader.clone();
             let interval = Duration::from_secs(5);
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(interval);
                 loop {
                     interval.tick().await;
-                    if let Err(e) = store.expire_leases().await {
+                    if is_leader.load(Ordering::Relaxed)
+                        && let Err(e) = store.expire_leases().await
+                    {
                         warn!("lease expiry monitor error: {e}");
                     }
                     if let Ok(nodes) = store.healthy_nodes().await {
@@ -183,12 +237,16 @@ impl Coordinator {
         // creates replication tasks.
         let replication_monitor = {
             let store = store.clone();
+            let is_leader = is_leader.clone();
             let rf = replication_factor;
             let interval = Duration::from_secs(10);
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(interval);
                 loop {
                     interval.tick().await;
+                    if !is_leader.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     if let Err(e) = Self::detect_under_replicated(&store, rf).await {
                         warn!("under-replication detector error: {e}");
                     }
@@ -200,6 +258,7 @@ impl Coordinator {
         // with bounded concurrency (max 4 concurrent recoveries).
         let recovery_scheduler = {
             let store = store.clone();
+            let is_leader = is_leader.clone();
             let interval = Duration::from_secs(5);
             let max_concurrent = 4usize;
             tokio::spawn(async move {
@@ -207,6 +266,9 @@ impl Coordinator {
                 let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
                 loop {
                     interval.tick().await;
+                    if !is_leader.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     let store = store.clone();
                     let semaphore = semaphore.clone();
                     tokio::spawn(async move {
@@ -226,10 +288,11 @@ impl Coordinator {
 
         // Orphan-chunk collector: reclaims bytes with no metadata row and
         // reaps uploads that never completed. Disabled when the interval is 0.
-        let orphan_gc = gc_config.map(|config| gc::spawn(store.clone(), config));
+        let orphan_gc = gc_config.map(|config| gc::spawn(store.clone(), config, is_leader));
 
         Self {
             service,
+            leadership_handle: Some(leadership),
             lease_monitor_handle: Some(lease_monitor),
             replication_monitor_handle: Some(replication_monitor),
             recovery_scheduler_handle: Some(recovery_scheduler),

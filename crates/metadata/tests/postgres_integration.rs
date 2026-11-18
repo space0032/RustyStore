@@ -36,7 +36,7 @@ async fn setup() -> Option<(MetadataStore, MutexGuard<'static, ()>)> {
         .expect("connect to TEST_DATABASE_URL");
 
     sqlx::raw_sql(
-        "TRUNCATE replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
+        "TRUNCATE coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
     )
     .execute(store.pool())
     .await
@@ -438,4 +438,34 @@ async fn replication_task_priority_order_and_actual_nodes() {
     assert_eq!(status, "done");
     assert_eq!(source, Some(n2), "actual source is persisted");
     assert_eq!(target, n3, "actual target is persisted");
+}
+
+#[tokio::test]
+async fn leadership_lease_allows_one_coordinator_and_expires() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+
+    assert!(store.try_acquire_leadership(first, 15_000).await.unwrap());
+    assert!(
+        store.try_acquire_leadership(first, 15_000).await.unwrap(),
+        "the leader renews its own lease"
+    );
+    assert!(
+        !store.try_acquire_leadership(second, 15_000).await.unwrap(),
+        "a standby cannot take an unexpired lease"
+    );
+
+    sqlx::query("UPDATE coordinator_leader SET lease_expiry = now() - INTERVAL '1 second'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        store.try_acquire_leadership(second, 15_000).await.unwrap(),
+        "a standby takes over an expired lease"
+    );
+    assert!(!store.try_acquire_leadership(first, 15_000).await.unwrap());
 }

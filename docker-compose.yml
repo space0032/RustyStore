@@ -53,6 +53,12 @@ services:
     ports:
       - "50051:50051"
       - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   storage-node-1:
     build:
@@ -60,10 +66,11 @@ services:
       dockerfile: crates/storage-node/Dockerfile
     depends_on:
       coordinator:
-        condition: service_started
+        condition: service_healthy
     environment:
       COORDINATOR_ADDR: coordinator:50051
       NODE_ADDR: 0.0.0.0:50051
+      ADVERTISED_ADDR: storage-node-1:50051
       STORAGE_PATH: /data/chunks
       STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
       DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
@@ -73,6 +80,12 @@ services:
       - "8082:8082"
     volumes:
       - sn1_data:/data/chunks
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   storage-node-2:
     build:
@@ -80,10 +93,11 @@ services:
       dockerfile: crates/storage-node/Dockerfile
     depends_on:
       coordinator:
-        condition: service_started
+        condition: service_healthy
     environment:
       COORDINATOR_ADDR: coordinator:50051
       NODE_ADDR: 0.0.0.0:50051
+      ADVERTISED_ADDR: storage-node-2:50051
       STORAGE_PATH: /data/chunks
       STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
       DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
@@ -93,6 +107,12 @@ services:
       - "8083:8082"
     volumes:
       - sn2_data:/data/chunks
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   storage-node-3:
     build:
@@ -100,10 +120,11 @@ services:
       dockerfile: crates/storage-node/Dockerfile
     depends_on:
       coordinator:
-        condition: service_started
+        condition: service_healthy
     environment:
       COORDINATOR_ADDR: coordinator:50051
       NODE_ADDR: 0.0.0.0:50051
+      ADVERTISED_ADDR: storage-node-3:50051
       STORAGE_PATH: /data/chunks
       STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
       DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
@@ -113,6 +134,12 @@ services:
       - "8084:8082"
     volumes:
       - sn3_data:/data/chunks
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   gateway:
     build:
@@ -120,15 +147,21 @@ services:
       dockerfile: crates/gateway/Dockerfile
     depends_on:
       coordinator:
-        condition: service_started
+        condition: service_healthy
     environment:
-      COORDINATOR_ADDR: coordinator:50051
+      COORDINATOR_ADDRS: coordinator:50051
       GATEWAY_ADDR: 0.0.0.0:8080
       CHUNK_SIZE_BYTES: "4194304"
       REPLICATION_FACTOR: "3"
       RUST_LOG: info
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
 volumes:
   postgres_data:

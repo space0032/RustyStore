@@ -40,8 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = common::config::parse_addr_value("NODE_ADDR", &node_addr)?;
 
-    let node =
-        Arc::new(StorageNode::new(advertised_addr.clone(), node_addr.clone(), storage_path).await?);
+    let node = Arc::new(
+        StorageNode::new(
+            advertised_addr.clone(),
+            advertised_addr.clone(),
+            storage_path,
+        )
+        .await?,
+    );
 
     // Prometheus metrics + health/readiness on a separate HTTP port. Started
     // before registration so liveness works while waiting for the coordinator.
@@ -72,7 +78,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(node_id) = register_with_retry(
         &coordinator_addr,
         &advertised_addr,
-        &node_addr,
         capacity_bytes,
         shutdown_rx.clone(),
     )
@@ -129,7 +134,6 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 async fn register_with_retry(
     coordinator_addr: &str,
     advertised_addr: &str,
-    grpc_addr: &str,
     capacity_bytes: i64,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Option<Uuid> {
@@ -138,7 +142,7 @@ async fn register_with_retry(
     }
     loop {
         tokio::select! {
-            result = register_once(coordinator_addr, advertised_addr, grpc_addr, capacity_bytes) => {
+            result = register_once(coordinator_addr, advertised_addr, capacity_bytes) => {
                 match result {
                     Ok(node_id) => return Some(node_id),
                     Err(e) => {
@@ -158,14 +162,13 @@ async fn register_with_retry(
 async fn register_once(
     coordinator_addr: &str,
     advertised_addr: &str,
-    grpc_addr: &str,
     capacity_bytes: i64,
 ) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
     let mut client = NodeServiceClient::connect(coordinator_addr.to_string()).await?;
 
     let request = RegisterRequest {
         addr: advertised_addr.to_string(),
-        grpc_addr: grpc_addr.to_string(),
+        grpc_addr: advertised_addr.to_string(),
         capacity_bytes,
         node_version: env!("CARGO_PKG_VERSION").to_string(),
     };
@@ -226,7 +229,7 @@ mod tests {
     async fn registration_stops_when_shutdown_already_requested() {
         let (_tx, rx) = tokio::sync::watch::channel(true);
 
-        let result = register_with_retry("http://127.0.0.1:1", "addr", "grpc", 1, rx).await;
+        let result = register_with_retry("http://127.0.0.1:1", "addr", 1, rx).await;
 
         assert!(result.is_none());
     }
@@ -239,7 +242,7 @@ mod tests {
             let _ = tx.send(true);
         });
 
-        let result = register_with_retry("http://127.0.0.1:1", "addr", "grpc", 1, rx).await;
+        let result = register_with_retry("http://127.0.0.1:1", "addr", 1, rx).await;
 
         assert!(result.is_none());
     }

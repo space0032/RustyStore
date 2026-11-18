@@ -11,6 +11,7 @@ use metadata::MetadataStore;
 use proto::storage::{ListChunksRequest, chunk_service_client::ChunkServiceClient};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -86,7 +87,11 @@ pub fn orphan_candidates(
 }
 
 /// Spawn the periodic collector. Call only when collection is enabled.
-pub fn spawn(store: Arc<MetadataStore>, config: GcConfig) -> JoinHandle<()> {
+pub fn spawn(
+    store: Arc<MetadataStore>,
+    config: GcConfig,
+    is_leader: Arc<AtomicBool>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(config.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -96,6 +101,9 @@ pub fn spawn(store: Arc<MetadataStore>, config: GcConfig) -> JoinHandle<()> {
 
         loop {
             ticker.tick().await;
+            if !is_leader.load(Ordering::Relaxed) {
+                continue;
+            }
             match run_once(&store, config.grace, config.upload_ttl).await {
                 Ok(stats) => {
                     if stats != GcStats::default() {

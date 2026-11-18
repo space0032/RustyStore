@@ -11,6 +11,14 @@
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- coordinator leader lease (single active coordinator for background tasks)
+CREATE TABLE IF NOT EXISTS coordinator_leader (
+  singleton    BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  leader_id    UUID NOT NULL,
+  lease_expiry TIMESTAMPTZ NOT NULL,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- storage nodes
 CREATE TABLE IF NOT EXISTS storage_nodes (
   node_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
