@@ -99,7 +99,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-36.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-37.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -162,8 +162,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 34 | Recovery Target Failover & Shutdown-Aware Registration | Complete | Recorded target treated as a hint, other healthy non-holders tried, registration retries observe SIGTERM |
 | 35 | Full-Stack & S3 Integration Tests | Complete | Real coordinator + 3 nodes + gateway on PostgreSQL, node-failure download, re-replication, MinIO S3 tests |
 | 36 | Recovery Race, Provenance, Priority & Throttle | Complete | Parallel source race, persisted actual nodes, priority queue, opt-in bandwidth limit |
+| 37 | Coordinator HA-Lite, Gateway Failover & Image Publishing | Complete | PostgreSQL leadership lease, standby coordinators, gateway retry/failover, Compose healthchecks, GHCR publishing |
 
-Phase documentation: `PHASE-1.md` through `PHASE-36.md`
+Phase documentation: `PHASE-1.md` through `PHASE-37.md`
 
 ---
 
@@ -210,15 +211,16 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 - **Not zero data loss**: loss of all replicas of a chunk = data loss for that chunk
 
 ### Availability
-- **Single Coordinator** is a SPOF for new writes (designed for HA evolution)
+- **HA-lite coordinators**: multiple coordinator processes share PostgreSQL; a renewable lease elects one leader for background work, and the gateway retries across a coordinator address list
+- **At least one coordinator is required for writes**: leadership is serialized through PostgreSQL, not a consensus protocol
 - Storage nodes continue serving existing chunks during Coordinator outage
-- Recovery scheduling runs in the Coordinator process with bounded concurrency (max 4 concurrent)
+- Recovery scheduling runs on the leader with bounded concurrency (max 4 concurrent)
 
 ---
 
 ## Testing & Benchmarks
 
-### Tests (81 unit + 10 integration + 7 PostgreSQL-backed = 98 total, all passing)
+### Tests (86 unit + 11 integration + 8 PostgreSQL-backed = 105 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -244,7 +246,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
 
-**coordinator** (26 tests):
+**coordinator** (28 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -271,8 +273,10 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 24. `target_candidates_empty_when_no_eligible_node` — recovery fails cleanly when every healthy node is a source or holder
 25. `node_endpoint_adds_scheme_only_when_missing` — recovery tolerates node addresses with or without an `http(s)` scheme
 26. `throttle_delay_matches_configured_rate` - recovery bandwidth conversion handles unset, zero, and byte counts
+27. `only_transient_statuses_are_retryable` - failover retries only transient gRPC statuses
+28. `connect_many_rejects_an_empty_address_list` - a gateway without coordinator addresses fails fast
 
-**gateway** (21 tests):
+**gateway** (24 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
@@ -294,6 +298,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 19. `coordinator_not_found_maps_to_404` — gRPC NotFound becomes a 404
 20. `coordinator_unavailable_maps_to_502` — other gRPC failures become 502
 21. `adds_scheme_only_when_missing` — storage-node gRPC addresses are normalized before connecting
+22. `parses_multiple_coordinators_and_normalizes_schemes` - comma-separated `COORDINATOR_ADDRS` entries are trimmed and normalized
+23. `falls_back_to_single_coordinator_addr` - `COORDINATOR_ADDR` remains the single-address fallback
+24. `rejects_an_empty_address_list` - an empty coordinator list is a startup error
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
@@ -313,7 +320,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 12. `registration_stops_when_shutdown_already_requested` — a pre-set shutdown flag skips coordinator registration
 13. `registration_stops_when_shutdown_arrives_while_retrying` — a signal interrupts the registration retry loop
 
-**metadata (7 tests, require `TEST_DATABASE_URL`)**:
+**metadata (8 tests, require `TEST_DATABASE_URL`)**:
 1. `complete_upload_records_chunks_and_durable_replicas` — chunk + durable replica rows committed atomically, manifest readable, no under-replication
 2. `deleting_file_cascades_chunks_replicas_sessions_and_tasks` — FK cascades remove chunks, replicas, upload sessions, and replication tasks
 3. `replication_task_dedup_and_stale_in_progress` — active-task dedup, abandoned `in_progress` expiry, completed tasks inactive
@@ -321,10 +328,11 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 5. `existing_chunk_ids_and_stale_upload_reaping` — reference lookup + TTL reaping removes abandoned uploads but keeps committed files
 6. `list_files_paginates_newest_first_and_hides_uploads` — keyset pages have no gaps or duplicates and exclude in-progress uploads
 7. `replication_task_priority_order_and_actual_nodes` - higher-priority tasks are claimed first and completed rows record the actual source/target
+8. `leadership_lease_allows_one_coordinator_and_expires` - one leader renews, a standby is blocked, expiry allows takeover, and the old leader is rejected
 
 These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposable database; otherwise they return early. Provision one with `scripts/test-postgres.sh` / `scripts/test-postgres.ps1`.
 
-**integration** (10 tests):
+**integration** (11 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
 2. `test_placement_with_healthy_nodes` — distinct node selection
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
@@ -335,6 +343,7 @@ These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposab
 8. `download_survives_a_storage_node_failure` — stops the first replica of a chunk and downloads from the other
 9. `concurrent_uploads_are_all_committed` — four parallel HTTP uploads commit and appear in one listing page
 10. `recovery_replaces_a_failed_replica` — expires a replica node's lease, marks its replica non-durable, and verifies the detector/scheduler copies the chunk to the spare node and records the actual source/target
+11. `gateway_fails_over_between_coordinators` - the gateway keeps serving after its active coordinator stops by retrying the standby coordinator
 
 **storage-engine S3 (2 tests, require `--features s3` and `TEST_S3_ENDPOINT`)**:
 1. `s3_store_roundtrip_and_integrity` — store, exists, retrieve, verify, list, delete, idempotent re-delete
@@ -384,7 +393,10 @@ docker build -f crates/gateway/Dockerfile -t rustystore-gateway .
 
 The build copies the complete Cargo workspace, and `.dockerignore` excludes
 `target`, `.git`, `data`, and the host toolchain file. GitHub Actions builds all
-three images on every push and pull request.
+three images on every push and pull request, and publishes version tags to GHCR
+as `ghcr.io/<owner>/<repo>/{coordinator,storage-node,gateway}`. Compose
+healthchecks gate startup on coordinator readiness; storage nodes and the
+gateway wait for it before registering or accepting traffic.
 
 ### Local run (service binaries)
 
@@ -404,19 +416,24 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - `storage-node-1/2/3` — persistent chunk storage
 - `gateway` — client-facing HTTP API
 
+Compose starts one coordinator by default. To exercise failover, add a second
+coordinator service against the same PostgreSQL database and set
+`COORDINATOR_ADDRS=coordinator-a:50051,coordinator-b:50051` on the gateway.
+
 ---
 
 ## Known Limitations
 
-1. **Single Coordinator SPOF** — new writes require the Coordinator; designed for HA evolution
-2. **S3 backend feature-gated** — `cargo build --features storage-engine/s3` required
+1. **HA-lite, not consensus** - coordinators share PostgreSQL and a lease elects one background worker; there is no quorum, fencing token, or automatic promotion of a different process. At least one coordinator must be reachable for new writes.
+2. **S3 backend feature-gated** - `cargo build --features storage-engine/s3` required
 3. **Recovery bandwidth throttling is opt-in and per-transfer** - `RECOVERY_BANDWIDTH_BYTES_PER_SEC` limits each source/target transfer, not aggregate recovery bandwidth
-4. **Recovery priority is a single integer** — derived from the number of missing replicas, with no aging or per-file priority
-5. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
-6. **TLS/mTLS not implemented** — recommended at reverse proxy layer
-7. **PostgreSQL integration tests skip without a database** — locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
-8. **Recovery target failover is sequential** — sources race in parallel, but targets are tried one at a time to avoid duplicate replicas; completed tasks record the nodes that actually served the transfer
-9. **Storage nodes advertise their bind address by default** — Compose deployments should set a reachable advertised address for coordinator/gateway connections
+4. **Recovery priority is a single integer** - derived from the number of missing replicas, with no aging or per-file priority
+5. **Rate limiting is per-process** - the token bucket lives in each gateway instance and is not shared across replicas
+6. **TLS/mTLS not implemented** - recommended at reverse proxy layer
+7. **PostgreSQL integration tests skip without a database** - locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
+8. **Recovery target failover is sequential** - sources race in parallel, but targets are tried one at a time to avoid duplicate replicas; completed tasks record the nodes that actually served the transfer
+9. **In-flight recovery after lease loss** - a former leader may finish transfers started before its lease expired; replication is idempotent and task state is authoritative, but brief duplicate transfers are possible
+10. **Storage nodes default to their bind address** - set `ADVERTISED_ADDR` when `NODE_ADDR` is not reachable by peers (Docker Compose sets it)
 
 ---
 
@@ -461,7 +478,13 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Dead-code removal** — the unused `crates/replication` placeholder is gone; the coordinator owns the scheduler (workspace now 11 crates)
 - **Full-stack integration tests** — real coordinator, three storage nodes, PostgreSQL, and the gateway router exercise multi-chunk upload/download/delete, replica failover during download, concurrent uploads, and automatic re-replication after lease expiry
 - **S3/MinIO integration tests** — feature-gated round-trip and integrity tests run in CI against a MinIO service container
-- **98 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
+- **Coordinator HA-lite** - a renewable PostgreSQL lease elects one coordinator for lease monitoring, under-replication detection, recovery scheduling, and orphan GC; standbys serve reads and writes
+- **Gateway coordinator failover** - `COORDINATOR_ADDRS` accepts a comma-separated list; transient gRPC failures rotate to the next coordinator and retry
+- **Leadership observability** - `rustystore_coordinator_is_leader` exposes which coordinator owns background work
+- **Compose readiness** - coordinator, storage-node, and gateway healthchecks gate startup, and storage nodes advertise a reachable `ADVERTISED_ADDR`
+- **GHCR image publishing** - version tags publish coordinator, storage-node, and gateway images with buildx cache reuse
+- **105 passing tests** across common config, storage engine, coordinator, gateway, storage node
+  (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---

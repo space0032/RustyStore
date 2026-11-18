@@ -50,7 +50,9 @@ docker compose up -d
 ```
 
 The coordinator applies the schema automatically on startup, so no separate
-migration step is required.
+migration step is required. Compose healthchecks wait for the coordinator before
+starting storage nodes and the gateway; storage nodes register their
+`ADVERTISED_ADDR` so peers connect to a reachable address.
 
 ## Quick Start (local)
 
@@ -78,7 +80,7 @@ Service binaries:
 |---|---|---|
 | `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC` |
 | `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR` |
-| `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES` |
+| `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `COORDINATOR_ADDRS`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES` |
 
 Configuration is validated at startup: an unparsable value or an out-of-range
 number (for example `REPLICATION_FACTOR=0` or `MAX_UPLOAD_BYTES=10MB`) exits
@@ -124,6 +126,20 @@ claimed highest-priority first, where priority is the number of missing
 replicas. Set `RECOVERY_BANDWIDTH_BYTES_PER_SEC` to throttle each recovery
 transfer (unset or `0` means unlimited).
 
+### Coordinator failover
+
+Multiple coordinator processes can share one PostgreSQL database. They all
+serve the same gRPC API, but background work (lease monitoring,
+under-replication detection, recovery scheduling, and orphan GC) runs only on
+the coordinator holding a renewable database lease. The lease lasts 15 seconds
+and is renewed every 5 seconds; if the leader stops renewing, a standby takes
+over on its next attempt. `rustystore_coordinator_is_leader` exposes leadership
+state.
+
+The gateway accepts a comma-separated `COORDINATOR_ADDRS` list (falling back to
+`COORDINATOR_ADDR`) and retries transient gRPC failures on the next coordinator.
+This is HA-lite: leadership is serialized through PostgreSQL rather than a
+consensus protocol, and writes still require at least one healthy coordinator.
 
 ### Observability
 
@@ -133,8 +149,9 @@ transfer (unset or `0` means unlimited).
 
 All `/metrics` endpoints expose Prometheus text format. Gateway metrics cover
 upload/download bytes and failures; coordinator metrics cover active nodes,
-under-replicated chunks, reclaimed orphan chunks/bytes, and reaped stale
-uploads; storage nodes report chunks/bytes stored and chunks deleted.
+under-replicated chunks, leadership state, reclaimed orphan chunks/bytes, and
+reaped stale uploads; storage nodes report chunks/bytes stored and chunks
+deleted.
 
 Every HTTP request gets an `x-request-id` (incoming or generated). The gateway
 attaches it to outgoing gRPC calls — including calls made from spawned upload
@@ -160,9 +177,11 @@ The metadata crate also has PostgreSQL-backed integration tests for replica
 commit, FK cascades, replication-task claiming, GC reaping, and file pagination.
 The integration crate starts a real coordinator and three real storage nodes
 against that database to cover multi-chunk upload/download/delete, download
-during a node failure, concurrent uploads, and automatic re-replication. These
-tests are skipped unless `TEST_DATABASE_URL` (or `DATABASE_URL`) is set. With
-Docker installed, provision a disposable database and run them with:
+during a node failure, concurrent uploads, automatic re-replication, and gateway
+failover to a standby coordinator. The metadata tests also cover coordinator
+leadership leases. These tests are skipped unless `TEST_DATABASE_URL` (or
+`DATABASE_URL`) is set. With Docker installed, provision a disposable database
+and run them with:
 
 ```bash
 scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
@@ -183,6 +202,9 @@ cargo test -p storage-engine --features s3 --test s3_integration
 - `cargo test --workspace` with `postgres:15-alpine` and `minio/minio` service
   containers, so the PostgreSQL-backed and S3-backed tests always run
 - Docker image builds for the coordinator, storage node, and gateway
+- On `v*` tags, images are published to GHCR as
+  `ghcr.io/<owner>/<repo>/{coordinator,storage-node,gateway}` with the tag and
+  `latest`
 
 Build an image locally with:
 
