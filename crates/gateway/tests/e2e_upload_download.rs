@@ -8,14 +8,12 @@
 //! storage node, SHA-256 verification, and ordered reconstruction.
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use futures_util::stream::Stream;
 use tokio::sync::Mutex;
-use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status, Streaming};
+use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -24,12 +22,9 @@ use proto::storage::{
     ChunkLocation, CompleteUploadRequest, CompleteUploadResponse, CreateUploadSessionRequest,
     CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse, FileSummary,
     GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
-    GetStatsRequest, GetStatsResponse, HeartbeatRequest, HeartbeatResponse, ListFilesRequest,
-    ListFilesResponse, ListNodesRequest, ListNodesResponse, NodeInfo, ReplicateChunkRequest,
-    ReplicateChunkResponse,
+    GetStatsRequest, GetStatsResponse, ListFilesRequest, ListFilesResponse, ListNodesRequest,
+    ListNodesResponse, NodeInfo,
 };
-
-type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
 // Deliberately different from the gateway's old hardcoded values (4 MB / 3) so
 // the test proves the gateway honors the coordinator's settings.
@@ -92,15 +87,6 @@ impl FakeCoordinator {
 
 #[tonic::async_trait]
 impl ClusterService for FakeCoordinator {
-    type NodeHeartbeatStream = BoxStream<HeartbeatResponse>;
-
-    async fn assign_replica(
-        &self,
-        _request: GrpcRequest<Streaming<ReplicateChunkRequest>>,
-    ) -> Result<GrpcResponse<ReplicateChunkResponse>, Status> {
-        Err(Status::unimplemented("assign_replica"))
-    }
-
     async fn create_upload_session(
         &self,
         request: GrpcRequest<CreateUploadSessionRequest>,
@@ -234,13 +220,6 @@ impl ClusterService for FakeCoordinator {
             deleted: true,
             chunks: file.chunks,
         }))
-    }
-
-    async fn node_heartbeat(
-        &self,
-        _request: GrpcRequest<Streaming<HeartbeatRequest>>,
-    ) -> Result<GrpcResponse<Self::NodeHeartbeatStream>, Status> {
-        Err(Status::unimplemented("node_heartbeat"))
     }
 
     async fn list_files(

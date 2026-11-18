@@ -1,7 +1,8 @@
 [package]
 name = "rustystore_benchmarks"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 criterion = "0.5"
@@ -19,6 +20,3 @@ harness = false
 [[bench]]
 name = "storage_throughput"
 harness = false
-
-[profile.release]
-opt-level = 3

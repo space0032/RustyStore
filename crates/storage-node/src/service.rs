@@ -1,23 +1,15 @@
 //! Storage node gRPC service implementation.
 //!
-//! Exposes NodeService, ChunkService, and ClusterService. Persists chunks via
-//! the storage engine (atomic writes + SHA-256), reports capacity, and
-//! handles replication transfers.
+//! Exposes ChunkService. Persists chunks via the storage engine (atomic writes
+//! + SHA-256) and handles replication transfers.
 
 use crate::StorageNode;
 use futures_util::stream::Stream;
 use proto::storage::{
-    CapacityReport, ChunkSummary, CompleteUploadRequest, CompleteUploadResponse,
-    CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteChunkRequest,
-    DeleteChunkResponse, DeleteFileRequest, DeleteFileResponse, Empty, GetChunkPlanRequest,
-    GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
-    GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, HeartbeatResponse,
-    ListChunksRequest, ListFilesRequest, ListFilesResponse, ListNodesRequest, ListNodesResponse,
-    RegisterRequest, RegisterResponse, ReplicateChunkRequest, ReplicateChunkResponse,
-    RetrieveChunkRequest, RetrieveChunkResponse, StoreChunkRequest, StoreChunkResponse,
+    ChunkSummary, DeleteChunkRequest, DeleteChunkResponse, ListChunksRequest,
+    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, RetrieveChunkResponse,
+    StoreChunkRequest, StoreChunkResponse,
     chunk_service_server::{ChunkService, ChunkServiceServer},
-    cluster_service_server::{ClusterService, ClusterServiceServer},
-    node_service_server::{NodeService, NodeServiceServer},
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -34,57 +26,6 @@ pub struct StorageNodeService {
 impl StorageNodeService {
     pub fn new(node: Arc<StorageNode>) -> Self {
         Self { node }
-    }
-}
-
-#[tonic::async_trait]
-impl NodeService for StorageNodeService {
-    type HeartbeatStream = BoxStream<HeartbeatResponse>;
-
-    async fn register(
-        &self,
-        request: Request<Streaming<RegisterRequest>>,
-    ) -> Result<Response<RegisterResponse>, Status> {
-        let mut stream = request.into_inner();
-        let reg = stream
-            .message()
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .ok_or_else(|| Status::invalid_argument("empty register stream"))?;
-
-        let node_id = self
-            .node
-            .register(&reg.addr, &reg.grpc_addr, reg.capacity_bytes)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        Ok(Response::new(RegisterResponse {
-            node_id: node_id.to_string(),
-            lease_ttl_ms: 15_000,
-            chunk_size_bytes: 4 * 1024 * 1024,
-            replication_factor: 3,
-        }))
-    }
-
-    async fn heartbeat(
-        &self,
-        _request: Request<Streaming<HeartbeatRequest>>,
-    ) -> Result<Response<Self::HeartbeatStream>, Status> {
-        Err(Status::unimplemented("heartbeat not yet implemented"))
-    }
-
-    async fn report_capacity(
-        &self,
-        _request: Request<CapacityReport>,
-    ) -> Result<Response<Empty>, Status> {
-        Err(Status::unimplemented("report_capacity not yet implemented"))
-    }
-
-    async fn check(
-        &self,
-        _request: Request<HealthCheckRequest>,
-    ) -> Result<Response<HealthCheckResponse>, Status> {
-        Ok(Response::new(HealthCheckResponse { serving: true }))
     }
 }
 
@@ -251,83 +192,6 @@ impl ChunkService for StorageNodeService {
     }
 }
 
-#[tonic::async_trait]
-impl ClusterService for StorageNodeService {
-    type NodeHeartbeatStream = BoxStream<HeartbeatResponse>;
-
-    async fn assign_replica(
-        &self,
-        _request: Request<Streaming<ReplicateChunkRequest>>,
-    ) -> Result<Response<ReplicateChunkResponse>, Status> {
-        Err(Status::unimplemented("assign_replica not yet implemented"))
-    }
-
-    async fn create_upload_session(
-        &self,
-        _request: Request<CreateUploadSessionRequest>,
-    ) -> Result<Response<CreateUploadSessionResponse>, Status> {
-        Err(Status::unimplemented(
-            "create_upload_session not yet implemented",
-        ))
-    }
-
-    async fn get_chunk_plan(
-        &self,
-        _request: Request<GetChunkPlanRequest>,
-    ) -> Result<Response<GetChunkPlanResponse>, Status> {
-        Err(Status::unimplemented("get_chunk_plan not yet implemented"))
-    }
-
-    async fn complete_upload(
-        &self,
-        _request: Request<CompleteUploadRequest>,
-    ) -> Result<Response<CompleteUploadResponse>, Status> {
-        Err(Status::unimplemented("complete_upload not yet implemented"))
-    }
-
-    async fn get_manifest(
-        &self,
-        _request: Request<GetManifestRequest>,
-    ) -> Result<Response<GetManifestResponse>, Status> {
-        Err(Status::unimplemented("get_manifest not yet implemented"))
-    }
-
-    async fn delete_file(
-        &self,
-        _request: Request<DeleteFileRequest>,
-    ) -> Result<Response<DeleteFileResponse>, Status> {
-        Err(Status::unimplemented("delete_file not yet implemented"))
-    }
-
-    async fn list_files(
-        &self,
-        _request: Request<ListFilesRequest>,
-    ) -> Result<Response<ListFilesResponse>, Status> {
-        Err(Status::unimplemented("list_files not yet implemented"))
-    }
-
-    async fn node_heartbeat(
-        &self,
-        _request: Request<Streaming<HeartbeatRequest>>,
-    ) -> Result<Response<Self::NodeHeartbeatStream>, Status> {
-        Err(Status::unimplemented("node_heartbeat not yet implemented"))
-    }
-
-    async fn list_nodes(
-        &self,
-        _request: Request<ListNodesRequest>,
-    ) -> Result<Response<ListNodesResponse>, Status> {
-        Err(Status::unimplemented("list_nodes not yet implemented"))
-    }
-
-    async fn get_stats(
-        &self,
-        _request: Request<GetStatsRequest>,
-    ) -> Result<Response<GetStatsResponse>, Status> {
-        Err(Status::unimplemented("get_stats not yet implemented"))
-    }
-}
-
 pub struct StorageNodeServer;
 
 impl StorageNodeServer {
@@ -360,9 +224,7 @@ impl StorageNodeServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let svc = StorageNodeService::new(node);
         tonic::transport::Server::builder()
-            .add_service(NodeServiceServer::new(svc.clone()))
-            .add_service(ChunkServiceServer::new(svc.clone()))
-            .add_service(ClusterServiceServer::new(svc))
+            .add_service(ChunkServiceServer::new(svc))
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
                 shutdown,
@@ -376,9 +238,8 @@ impl StorageNodeServer {
 mod tests {
     use super::*;
     use proto::storage::{
-        ChunkReference, DeleteChunkRequest, HealthCheckRequest, ListChunksRequest,
-        RetrieveChunkRequest, StoreChunkRequest, chunk_service_client::ChunkServiceClient,
-        node_service_client::NodeServiceClient,
+        ChunkReference, DeleteChunkRequest, ListChunksRequest, RetrieveChunkRequest,
+        StoreChunkRequest, chunk_service_client::ChunkServiceClient,
         retrieve_chunk_response::Payload as RetrievePayload,
         store_chunk_request::Payload as StorePayload,
     };
@@ -618,15 +479,13 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut client = NodeServiceClient::connect(format!("http://{addr}"))
+        let mut client = ChunkServiceClient::connect(format!("http://{addr}"))
             .await
             .expect("connect");
-        let response = client
-            .check(HealthCheckRequest {})
+        client
+            .list_chunks(ListChunksRequest {})
             .await
-            .expect("check")
-            .into_inner();
-        assert!(response.serving);
+            .expect("list chunks");
 
         drop(client);
         tx.send(()).expect("send shutdown");

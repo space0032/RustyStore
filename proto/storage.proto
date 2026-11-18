@@ -152,10 +152,6 @@ service ChunkService {
 }
 
 service ClusterService {
-  // Coordinator -> storage node
-  rpc AssignReplica(stream ReplicateChunkRequest) returns (ReplicateChunkResponse);
-  rpc NodeHeartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
-
   // Gateway -> Coordinator
   rpc CreateUploadSession(CreateUploadSessionRequest) returns (CreateUploadSessionResponse);
   rpc GetChunkPlan(GetChunkPlanRequest) returns (GetChunkPlanResponse);
