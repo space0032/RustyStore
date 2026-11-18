@@ -104,14 +104,13 @@ sequenceDiagram
     participant DST as Storage Node (target)
     participant DB as PostgreSQL
 
-    CRD->>DB: find under-replicated chunk
-    CRD->>SRC: ReplicateChunk(chunk_id, target=DST, expected_sha256)
-    SRC->>SRC: read chunk, verify SHA-256
-    SRC->>DST: stream chunk frames
+    CRD->>DB: claim under-replicated task
+    CRD->>SRC: RetrieveChunk(chunk_id)
+    SRC-->>CRD: stream chunk frames
+    CRD->>DST: StoreChunk(chunk_id, expected_sha256)
     DST->>DST: atomic write (temp + fsync + rename) + verify hash
-    DST-->>SRC: Ack(durable=true)
-    SRC-->>CRD: Ack
-    CRD->>DB: INSERT chunk_replica (chunk_id, node_id=DST, durable=true)
+    DST-->>CRD: Ack(durable=true)
+    CRD->>DB: mark task done + insert chunk_replica (chunk_id, node_id=DST, durable=true)
 ```
 
 ## Node failure & recovery

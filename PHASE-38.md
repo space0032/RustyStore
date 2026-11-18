@@ -15,8 +15,8 @@ consistent.
 ### 1. Remove unused coordinator-to-node RPCs
 
 `proto/storage.proto` no longer declares `AssignReplica` or `NodeHeartbeat`.
-Replication already happens through `ChunkService::ReplicateChunk` and the
-coordinator's recovery scheduler, so these RPCs had no callers.
+Replication is orchestrated by the coordinator's recovery scheduler through
+`ChunkService::RetrieveChunk` and `StoreChunk`, so these RPCs had no callers.
 
 `ClusterService` now contains only the gateway-facing API:
 

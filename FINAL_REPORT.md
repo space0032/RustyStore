@@ -49,7 +49,7 @@ Client (HTTP) ──┘                            │                          
 |---|---|
 | **Gateway** | Client-facing HTTP REST API, streaming multipart uploads/downloads, auth |
 | **Coordinator** | Cluster metadata, node health/leases, placement, replication scheduling |
-| **Storage Nodes** | Persistent chunk storage, atomic writes, inter-node data transfers |
+| **Storage Nodes** | Persistent chunk storage, atomic writes, SHA-256 verification |
 | **PostgreSQL** | File/chunk/replica metadata (not file contents) |
 | **MinIO** | Optional S3-compatible object storage backend (feature-gated) |
 
@@ -77,7 +77,7 @@ distributed-storage/
 │   ├── storage-engine/     # Filesystem chunk store (FsChunkStore), S3 store (feature-gated)
 │   ├── metadata/           # SQLx models + queries against PostgreSQL
 │   ├── coordinator/        # Node registration, health, placement, replication scheduling (+ coordinator binary)
-│   ├── storage-node/       # Tonic gRPC server for chunk store/retrieve/replicate (+ storage-node binary)
+│   ├── storage-node/       # Tonic gRPC server for chunk store/retrieve/list (+ storage-node binary)
 │   ├── gateway/            # Axum HTTP gateway, streaming upload/download, auth (+ gateway binary)
 │   └── observability/      # Tracing + Prometheus metrics setup
 ├── migrations/
@@ -99,7 +99,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-38.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-39.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -153,7 +153,7 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 25 | Coordinator-Authoritative Chunking/Replication | Complete | Chunk size + rf returned by `CreateUploadSession`; gateway honors them |
 | 26 | Request-ID Propagation to gRPC | Complete | Task-local id attached to coordinator/storage-node gRPC metadata, incl. spawned tasks |
 | 27 | Durable Replica Recording on Commit | Complete | `ChunkManifest.node_ids`, atomic chunk+replica insert, empty replica list rejected |
-| 28 | Replication Task Deduplication | Complete | One live task per chunk; stale `in_progress` tasks expire after 5 minutes |
+| 28 | Replication Task Deduplication | Complete | One live task per chunk; stale `in_progress` tasks are failed after 5 minutes |
 | 29 | Orphan-Chunk GC & Stale Upload Reaper | Complete | `ListChunks` RPC, grace-period collection, TTL reaping of abandoned uploads |
 | 30 | PostgreSQL-Backed Integration Tests | Complete | `metadata/tests/postgres_integration.rs`, `scripts/test-postgres.{sh,ps1}` |
 | 31 | Paginated File Listing | Complete | `ListFiles` RPC, keyset cursor, `GET /api/v1/files` |
@@ -164,8 +164,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 36 | Recovery Race, Provenance, Priority & Throttle | Complete | Parallel source race, persisted actual nodes, priority queue, opt-in bandwidth limit |
 | 37 | Coordinator HA-Lite, Gateway Failover & Image Publishing | Complete | PostgreSQL leadership lease, standby coordinators, gateway retry/failover, Compose healthchecks, GHCR publishing |
 | 38 | Legacy RPC & Workspace Cleanup | Complete | Removed AssignReplica/NodeHeartbeat, storage-node service stubs, dead recovery cycle; workspace metadata and Compose cleanup |
+| 39 | Dead RPC, Task Recovery & Docs Cleanup | Complete | Removed `ReplicateChunk` and dead `StorageNode` address API; per-task retry limit; stale recovery task cleanup; corrected operations docs/env/config |
 
-Phase documentation: `PHASE-1.md` through `PHASE-38.md`
+Phase documentation: `PHASE-1.md` through `PHASE-39.md`
 
 ---
 
@@ -192,7 +193,7 @@ Phase documentation: `PHASE-1.md` through `PHASE-38.md`
 | Service | RPC | Direction |
 |---|---|---|
 | `NodeService` | `Register`, `Heartbeat`, `ReportCapacity`, `Check` | Storage node -> Coordinator |
-| `ChunkService` | `StoreChunk` (streaming), `RetrieveChunk` (streaming), `DeleteChunk`, `ListChunks` (streaming), `ReplicateChunk` (streaming) | Gateway / Coordinator -> Storage node |
+| `ChunkService` | `StoreChunk` (streaming), `RetrieveChunk` (streaming), `DeleteChunk`, `ListChunks` (streaming) | Gateway / Coordinator -> Storage node |
 | `ClusterService` | `CreateUploadSession`, `GetChunkPlan`, `CompleteUpload`, `GetManifest`, `DeleteFile`, `ListFiles`, `ListNodes`, `GetStats` | Gateway -> Coordinator |
 
 Full OpenAPI spec: `docs/api/openapi.yaml`
@@ -221,7 +222,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Tests (86 unit + 11 integration + 8 PostgreSQL-backed = 105 total, all passing)
+### Tests (86 unit + 11 integration + 9 PostgreSQL-backed = 106 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -330,6 +331,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 6. `list_files_paginates_newest_first_and_hides_uploads` — keyset pages have no gaps or duplicates and exclude in-progress uploads
 7. `replication_task_priority_order_and_actual_nodes` - higher-priority tasks are claimed first and completed rows record the actual source/target
 8. `leadership_lease_allows_one_coordinator_and_expires` - one leader renews, a standby is blocked, expiry allows takeover, and the old leader is rejected
+9. `replication_task_retry_limit_and_stale_cleanup` - retries stop at the task's `max_attempts`, and abandoned `in_progress` tasks are failed for rescheduling
 
 These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposable database; otherwise they return early. Provision one with `scripts/test-postgres.sh` / `scripts/test-postgres.ps1`.
 
@@ -460,7 +462,7 @@ coordinator service against the same PostgreSQL database and set
 - **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response, propagated into coordinator and storage-node gRPC metadata
 - **Request-ID propagation** — a task-local id is attached to outgoing gRPC calls and re-scoped across `tokio::spawn` boundaries (upload replica fan-out, download streaming)
 - **Replica metadata committed with files** — uploads record durable replicas in the same transaction as the chunk and file rows, so manifests are downloadable and deletion can locate chunk bytes
-- **Replication task deduplication** — one live task per chunk prevents detector-tick task storms, with stale in-progress tasks expiring so recovery cannot wedge
+- **Replication task deduplication** — one live task per chunk prevents detector-tick task storms, with stale in-progress tasks failed so recovery cannot wedge
 - **Orphan-chunk GC** — coordinator lists chunks on healthy nodes, subtracts metadata references, and reclaims bytes older than a grace period; abandoned uploads are reaped on a TTL
 - **PostgreSQL-backed integration tests** — real SQL paths for replica commit, FK cascades, task dedup/priority claiming, GC reaping, and file pagination, provisioned through a disposable Docker database
 - **Paginated file listing** — `GET /api/v1/files` with opaque keyset cursors (timestamp + id), stable newest-first ordering, and a committed-only filter
@@ -487,7 +489,10 @@ coordinator service against the same PostgreSQL database and set
 - **Legacy RPC cleanup** - storage nodes expose only `ChunkService`; the unused `AssignReplica`/`NodeHeartbeat` RPCs, storage-node `NodeService`/`ClusterService` stubs, and the dead single-cycle recovery path are gone
 - **Consistent workspace metadata** - every crate inherits version, edition 2024, and `rust-version = "1.85"` from `[workspace.package]`; the duplicate benchmark release profile is removed
 - **Compose cleanup** - dropped the obsolete `version` field and unused storage-node `DATABASE_URL`
-- **105 passing tests** across common config, storage engine, coordinator, gateway, storage node
+- **Dead RPC/API cleanup** - removed the unimplemented `ReplicateChunk` RPC and the unused storage-node `register`/address API; storage nodes expose only the operations they serve
+- **Recovery task correctness** - retries now honor each task's `max_attempts`, and abandoned `in_progress` tasks are failed by the leader so fresh work can be scheduled
+- **Operations cleanup** - corrected health/metrics ports and migration guidance, and removed unused `PROMETHEUS_ADDR`/lease env vars, the dead `common::Config` struct, and `envy`
+- **106 passing tests** across common config, storage engine, coordinator, gateway, storage node
   (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 

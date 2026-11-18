@@ -16,7 +16,7 @@ Client (HTTP) -> Gateway (Axum) <-> Coordinator (Tonic gRPC) <-> Storage Nodes (
 
 - **Gateway**: client-facing HTTP REST API, streaming multipart uploads/downloads.
 - **Coordinator**: cluster metadata, node health, placement, replication scheduling.
-- **Storage Nodes**: persistent chunk storage, atomic writes, inter-node transfers.
+- **Storage Nodes**: persistent chunk storage, atomic writes, SHA-256 verification.
 - **PostgreSQL**: file/chunk/replica metadata (not file contents).
 
 ## Crate Structure
@@ -28,7 +28,7 @@ Client (HTTP) -> Gateway (Axum) <-> Coordinator (Tonic gRPC) <-> Storage Nodes (
 | `storage-engine` | Filesystem chunk store, atomic writes, SHA-256 |
 | `metadata` | SQLx models + queries against PostgreSQL |
 | `coordinator` | Node registration, health, placement, manifest management |
-| `storage-node` | Tonic gRPC server for chunk store/retrieve/replicate |
+| `storage-node` | Tonic gRPC server for chunk store/retrieve/list |
 | `gateway` | Axum HTTP gateway, streaming upload/download |
 | `observability` | Tracing + Prometheus metrics |
 
