@@ -98,6 +98,10 @@ deletes the chunk bytes from the storage nodes that held them. Byte deletion is
 best-effort: a failure leaves unreferenced chunks (safe to garbage-collect) but
 never metadata pointing at missing data. Deleting an unknown file returns 404.
 
+`GET /api/v1/files?limit=50` lists committed files newest-first. Pages use
+opaque keyset cursors: pass the returned `next_cursor` back as `cursor`, and
+stop when it is absent. `limit` defaults to 50 and is capped at 200.
+
 The coordinator periodically reclaims orphaned chunk bytes (for example from
 uploads rejected by `MAX_UPLOAD_BYTES` or client disconnects) by listing chunks
 on healthy nodes and deleting any that have no metadata row and are older than

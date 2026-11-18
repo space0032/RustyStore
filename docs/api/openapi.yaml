@@ -104,6 +104,63 @@ paths:
                 type: string
 
   /api/v1/files:
+    get:
+      tags: [files]
+      summary: List files
+      description: |
+        Lists committed files newest-first using opaque keyset pagination.
+        Pass the returned `next_cursor` as the `cursor` query parameter to
+        fetch the next page; the field is omitted on the last page.
+      operationId: listFiles
+      parameters:
+        - in: query
+          name: limit
+          description: Page size (default 50, max 200)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - in: query
+          name: cursor
+          description: Opaque cursor from the previous page
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A page of committed files
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file_id:
+                          type: string
+                          format: uuid
+                        filename:
+                          type: string
+                        total_size:
+                          type: integer
+                        chunk_count:
+                          type: integer
+                        replication_factor:
+                          type: integer
+                        status:
+                          type: string
+                          example: committed
+                        created_epoch_ms:
+                          type: integer
+                  next_cursor:
+                    type: string
+        '400':
+          description: Invalid limit or cursor
+        '502':
+          description: Coordinator error
     post:
       tags: [files]
       summary: Upload a file
