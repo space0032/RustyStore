@@ -92,7 +92,9 @@ placement.
 All services handle `SIGINT` (Ctrl+C) and `SIGTERM` (Docker/Kubernetes) and
 shut down gracefully, draining in-flight work before exiting. The coordinator
 and storage node fan one signal out to both their gRPC API and their HTTP
-probe/metrics server.
+probe/metrics server. A storage node that is still waiting to register with an
+unavailable coordinator also stops retrying on shutdown instead of blocking
+exit.
 
 `DELETE /api/v1/files/{id}` removes the file and chunk metadata first, then
 deletes the chunk bytes from the storage nodes that held them. Byte deletion is
@@ -110,10 +112,11 @@ on healthy nodes and deleting any that have no metadata row and are older than
 `UPLOAD_SESSION_TTL_SECS`. Set `ORPHAN_GC_INTERVAL_SECS=0` to disable the
 collector.
 
-Recovery treats a task's recorded source as a hint. If that node is unhealthy,
-unreachable, or returns bytes that fail SHA-256 verification, the coordinator
-retries the transfer from another healthy durable replica before failing the
-task.
+Recovery treats a task's recorded source and target as hints. If the source is
+unhealthy, unreachable, or returns bytes that fail SHA-256 verification, the
+coordinator retries the transfer from another healthy durable replica. If the
+target is unhealthy or refuses the write, it tries another healthy node that
+does not already hold the chunk.
 
 
 ### Observability

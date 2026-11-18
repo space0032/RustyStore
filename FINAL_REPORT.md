@@ -99,7 +99,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-33.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-34.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -159,8 +159,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 31 | Paginated File Listing | Complete | `ListFiles` RPC, keyset cursor, `GET /api/v1/files` |
 | 32 | Graceful HTTP Shutdown, CI, Container Builds | Complete | Shared shutdown fan-out, `.github/workflows/ci.yml`, workspace-complete Dockerfiles |
 | 33 | Recovery Source Failover | Complete | Ordered healthy durable replicas, per-source SHA-256 verification, dead `replication` crate removed |
+| 34 | Recovery Target Failover & Shutdown-Aware Registration | Complete | Recorded target treated as a hint, other healthy non-holders tried, registration retries observe SIGTERM |
 
-Phase documentation: `PHASE-1.md` through `PHASE-33.md`
+Phase documentation: `PHASE-1.md` through `PHASE-34.md`
 
 ---
 
@@ -215,7 +216,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Tests (73 unit + 6 integration + 6 PostgreSQL-backed = 85 total, all passing)
+### Tests (78 unit + 6 integration + 6 PostgreSQL-backed = 90 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -241,7 +242,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
 
-**coordinator** (21 tests):
+**coordinator** (24 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -263,6 +264,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 19. `source_candidates_prefers_recorded_source` — the task's source is tried first, then other replicas
 20. `source_candidates_falls_back_when_recorded_source_unhealthy` — an unhealthy source is skipped for a live replica
 21. `source_candidates_excludes_target_and_non_durable_replicas` — destination and non-durable rows never become sources
+22. `target_candidates_prefers_recorded_target` — the task's target is tried first, then other healthy nodes
+23. `target_candidates_skips_unhealthy_target_and_occupied_nodes` — dead targets and nodes that already hold the chunk are skipped
+24. `target_candidates_empty_when_no_eligible_node` — recovery fails cleanly when every healthy node is a source or holder
 
 **gateway** (20 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
@@ -289,7 +293,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
 
-**storage-node** (11 tests: 5 gRPC + 6 HTTP):
+**storage-node** (13 tests: 5 gRPC + 6 HTTP + 2 registration):
 1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`, asserts storage counters advance
 2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
 3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
@@ -301,6 +305,8 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 9. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
 10. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
 11. `graceful_shutdown_stops_http_server` — the HTTP probe server drains and releases its port on shutdown
+12. `registration_stops_when_shutdown_already_requested` — a pre-set shutdown flag skips coordinator registration
+13. `registration_stops_when_shutdown_arrives_while_retrying` — a signal interrupts the registration retry loop
 
 **metadata (6 tests, require `TEST_DATABASE_URL`)**:
 1. `complete_upload_records_chunks_and_durable_replicas` — chunk + durable replica rows committed atomically, manifest readable, no under-replication
@@ -393,7 +399,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 5. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 6. **TLS/mTLS not implemented** — recommended at reverse proxy layer
 7. **PostgreSQL integration tests skip without a database** — locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
-8. **Recovery failover is sequential** — candidate sources are tried one at a time; a successful failover does not rewrite the task's recorded source
+8. **Recovery failover is sequential** — candidate sources and targets are tried one at a time; a successful failover does not rewrite the task's recorded source or target
 
 ---
 
@@ -431,9 +437,10 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
 - **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
 - **Coordinator-authoritative chunking** — the coordinator supplies chunk size and replication factor; the gateway uses them, so manifests match actual placement
-- **Recovery source failover** — replication tries the recorded source first, then any other healthy durable replica, verifying SHA-256 per source before writing to the target
+- **Recovery failover** — replication tries the recorded source first, then any other healthy durable replica, verifying SHA-256 per source before writing; the recorded target is likewise a hint, with other healthy non-holders tried when it is unhealthy or refuses the write
+- **Shutdown-aware registration** — a storage node waiting for the coordinator stops retrying on SIGINT/SIGTERM and drains its HTTP probes instead of blocking shutdown
 - **Dead-code removal** — the unused `crates/replication` placeholder is gone; the coordinator owns the scheduler (workspace now 11 crates)
-- **85 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
+- **90 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
