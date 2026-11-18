@@ -71,15 +71,36 @@ fn json_response(status: StatusCode, body: &'static str) -> Response {
 
 /// Bind `addr` and serve the HTTP surface until the process exits.
 pub async fn serve(addr: SocketAddr, ready: ReadyCheck) -> std::io::Result<()> {
+    serve_with_shutdown(addr, ready, std::future::pending()).await
+}
+
+/// Bind `addr` and serve until `shutdown` resolves, then drain in-flight
+/// requests. Metrics and probe connections are short-lived, so this is quick.
+pub async fn serve_with_shutdown(
+    addr: SocketAddr,
+    ready: ReadyCheck,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    serve_listener(listener, ready).await
+    serve_listener_with_shutdown(listener, ready, shutdown).await
 }
 
 /// Serve the HTTP surface on an already-bound listener.
 pub async fn serve_listener(listener: TcpListener, ready: ReadyCheck) -> std::io::Result<()> {
+    serve_listener_with_shutdown(listener, ready, std::future::pending()).await
+}
+
+/// Serve on an already-bound listener until `shutdown` resolves.
+pub async fn serve_listener_with_shutdown(
+    listener: TcpListener,
+    ready: ReadyCheck,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     let addr = listener.local_addr()?;
     tracing::info!("storage node metrics/health listening on {addr}");
-    axum::serve(listener, router(ready)).await
+    axum::serve(listener, router(ready))
+        .with_graceful_shutdown(shutdown)
+        .await
 }
 
 #[cfg(test)]
@@ -162,5 +183,48 @@ mod tests {
             "unexpected response: {response}"
         );
         assert!(response.contains("\"service\":\"storage-node\""));
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_stops_http_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            serve_listener_with_shutdown(listener, stub_ready(true), async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let response = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+            stream
+                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write request");
+            let mut buf = String::new();
+            stream.read_to_string(&mut buf).expect("read response");
+            buf
+        })
+        .await
+        .expect("join client");
+        assert!(
+            response.contains("200 OK"),
+            "unexpected response: {response}"
+        );
+
+        shutdown_tx.send(()).expect("send shutdown");
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("server stops")
+            .expect("join server")
+            .expect("serve result");
+
+        assert!(
+            tokio::net::TcpStream::connect(addr).await.is_err(),
+            "listener must be closed after shutdown"
+        );
     }
 }

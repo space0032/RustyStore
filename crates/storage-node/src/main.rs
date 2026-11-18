@@ -51,11 +51,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let node = Arc::clone(&ready_node);
         Box::pin(async move { node.node_id().is_some() && node.capacity().await.is_ok() })
     });
-    tokio::spawn(async move {
-        if let Err(e) = storage_node::http::serve(http_addr, ready).await {
-            tracing::error!("storage node HTTP server failed: {e}");
-        }
+
+    // One shutdown signal fans out to both the gRPC and HTTP servers so a
+    // SIGTERM drains everything instead of leaving the probe port bound.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let signal_tx = shutdown_tx.clone();
+    let signal_task = tokio::spawn(async move {
+        common::shutdown::signal().await;
+        tracing::info!("shutdown signal received; draining storage node");
+        let _ = shutdown_tx.send(true);
     });
+    let http_task = tokio::spawn(storage_node::http::serve_with_shutdown(
+        http_addr,
+        ready,
+        wait_for_shutdown(shutdown_rx.clone()),
+    ));
 
     // Register with the coordinator, retrying until it is reachable.
     let node_id = register_with_retry(
@@ -78,7 +88,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("storage node listening on {addr} (advertised as {advertised_addr})");
-    StorageNodeServer::run(addr, node).await
+    let result =
+        StorageNodeServer::run_with_shutdown(addr, node, wait_for_shutdown(shutdown_rx)).await;
+
+    // The gRPC server also stops if it fails to start; make sure the HTTP
+    // surface is drained either way.
+    let _ = signal_tx.send(true);
+    match http_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("storage node HTTP server failed: {e}"),
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => tracing::error!("storage node HTTP task failed: {e}"),
+    }
+    signal_task.abort();
+    result
+}
+
+/// Resolve once the shared shutdown flag flips to `true`.
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    let _ = rx.changed().await;
 }
 
 async fn register_with_retry(

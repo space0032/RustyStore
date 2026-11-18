@@ -34,15 +34,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = Arc::clone(&ready_store);
         Box::pin(async move { store.ping().await.is_ok() })
     });
-    tokio::spawn(async move {
-        if let Err(e) = coordinator::http::serve(http_addr, ready).await {
-            tracing::error!("coordinator HTTP server failed: {e}");
-        }
+
+    // One shutdown signal fans out to both the gRPC and HTTP servers so a
+    // SIGTERM drains everything instead of leaving the probe port bound.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let signal_tx = shutdown_tx.clone();
+    let signal_task = tokio::spawn(async move {
+        common::shutdown::signal().await;
+        tracing::info!("shutdown signal received; draining coordinator");
+        let _ = shutdown_tx.send(true);
     });
+    let http_task = tokio::spawn(coordinator::http::serve_with_shutdown(
+        http_addr,
+        ready,
+        wait_for_shutdown(shutdown_rx.clone()),
+    ));
 
     tracing::info!(
         "coordinator listening on {addr} (replication_factor={replication_factor}, chunk_size={chunk_size_bytes})"
     );
 
-    CoordinatorServer::run(addr, store, replication_factor, chunk_size_bytes).await
+    let result = CoordinatorServer::run_with_shutdown(
+        addr,
+        store,
+        replication_factor,
+        chunk_size_bytes,
+        wait_for_shutdown(shutdown_rx),
+    )
+    .await;
+
+    // The gRPC server also stops if it fails to start; make sure the HTTP
+    // surface is drained either way.
+    let _ = signal_tx.send(true);
+    match http_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("coordinator HTTP server failed: {e}"),
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => tracing::error!("coordinator HTTP task failed: {e}"),
+    }
+    signal_task.abort();
+    result
+}
+
+/// Resolve once the shared shutdown flag flips to `true`.
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    let _ = rx.changed().await;
 }

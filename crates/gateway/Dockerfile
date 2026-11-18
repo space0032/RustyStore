@@ -1,13 +1,12 @@
 # RustyStore gateway image.
 # Usage: docker build -f crates/gateway/Dockerfile -t rustystore-gateway .
 
-FROM rust:1.82-slim AS builder
+FROM rust:1-slim-bookworm AS builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY crates ./crates
-COPY proto ./proto
-COPY migrations ./migrations
+# The workspace has members under crates/, benchmarks/, and tests/, so the
+# whole context is needed for Cargo to resolve the workspace.
+COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release -p gateway --bin gateway && \
