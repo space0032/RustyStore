@@ -3,7 +3,7 @@
 
 use crate::Coordinator;
 use metadata::MetadataStore;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 pub struct CoordinatorServer;
@@ -70,6 +70,25 @@ impl CoordinatorServer {
             return Err("RECOVERY_PRIORITY_AGING_SECS must not be negative".into());
         }
 
+        let listener_addr = listener.local_addr()?;
+        let advertise_addr = std::env::var("COORDINATOR_ADVERTISE_ADDR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                let mut addr = listener_addr;
+                if addr.ip().is_unspecified() {
+                    addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                }
+                addr.to_string()
+            });
+        let advertise_addr =
+            if advertise_addr.starts_with("http://") || advertise_addr.starts_with("https://") {
+                advertise_addr
+            } else {
+                format!("http://{advertise_addr}")
+            };
+
         let coordinator = Coordinator::new(
             store,
             replication_factor,
@@ -78,6 +97,7 @@ impl CoordinatorServer {
             recovery_bandwidth_bytes_per_sec,
             recovery_aggregate_bytes_per_sec,
             recovery_priority_aging_secs,
+            advertise_addr,
         );
         let svc = coordinator.service();
 

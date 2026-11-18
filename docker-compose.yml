@@ -42,6 +42,7 @@ services:
     environment:
       DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
       COORDINATOR_ADDR: 0.0.0.0:50051
+      COORDINATOR_ADVERTISE_ADDR: coordinator:50051
       CHUNK_SIZE_BYTES: "4194304"
       REPLICATION_FACTOR: "3"
       ORPHAN_GC_INTERVAL_SECS: "300"

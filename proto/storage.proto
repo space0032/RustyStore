@@ -143,6 +143,8 @@ service ClusterService {
   rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  // Live coordinator endpoints for gateway discovery.
+  rpc ListCoordinators(ListCoordinatorsRequest) returns (ListCoordinatorsResponse);
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
   // Shared token-bucket limiter keyed by client identity (usually IP).
   rpc CheckRateLimit(RateLimitRequest) returns (RateLimitResponse);
@@ -267,6 +269,16 @@ message NodeInfo {
   bool healthy = 4;
   int64 available_bytes = 5;
   int64 capacity_bytes = 6;
+}
+
+message ListCoordinatorsRequest {}
+message ListCoordinatorsResponse {
+  repeated CoordinatorInfo coordinators = 1;
+}
+
+message CoordinatorInfo {
+  string coordinator_id = 1;
+  string grpc_addr = 2;
 }
 
 message RateLimitRequest {

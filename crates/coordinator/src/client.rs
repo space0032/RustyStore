@@ -5,8 +5,9 @@
 
 use proto::storage::{
     ChunkManifest, CompleteUploadRequest, CreateUploadSessionRequest, DeleteFileRequest,
-    GetChunkPlanRequest, GetManifestRequest, GetStatsRequest, ListFilesRequest, ListNodesRequest,
-    RateLimitRequest, cluster_service_client::ClusterServiceClient,
+    GetChunkPlanRequest, GetManifestRequest, GetStatsRequest, ListCoordinatorsRequest,
+    ListFilesRequest, ListNodesRequest, RateLimitRequest,
+    cluster_service_client::ClusterServiceClient,
 };
 use std::future::Future;
 use std::io;
@@ -85,6 +86,20 @@ impl CoordinatorClient {
         Err(boxed_error(last_error.unwrap_or_else(|| {
             "no coordinator addresses configured".to_string()
         })))
+    }
+
+    /// Endpoints currently known to this client.
+    pub fn addrs(&self) -> &[String] {
+        &self.addrs
+    }
+
+    /// Add newly discovered endpoints without disturbing the active channel.
+    pub fn merge_addrs(&mut self, addrs: impl IntoIterator<Item = String>) {
+        for addr in addrs {
+            if !self.addrs.iter().any(|known| known == &addr) {
+                self.addrs.push(addr);
+            }
+        }
     }
 
     async fn connect_at(
@@ -365,6 +380,32 @@ impl CoordinatorClient {
                 healthy: n.healthy,
                 available_bytes: n.available_bytes,
                 capacity_bytes: n.capacity_bytes,
+            })
+            .collect())
+    }
+
+    /// Discover live coordinator endpoints from the cluster registry.
+    pub async fn list_coordinators(
+        &mut self,
+    ) -> Result<Vec<(Uuid, String)>, Box<dyn std::error::Error + Send + Sync>> {
+        let resp = self
+            .with_retry(|inner| {
+                let req = request_with_id(ListCoordinatorsRequest {});
+                Box::pin(async move {
+                    inner
+                        .list_coordinators(req)
+                        .await
+                        .map(|response| response.into_inner())
+                })
+            })
+            .await?;
+        Ok(resp
+            .coordinators
+            .into_iter()
+            .filter_map(|c| {
+                Uuid::parse_str(&c.coordinator_id)
+                    .ok()
+                    .map(|id| (id, c.grpc_addr))
             })
             .collect())
     }

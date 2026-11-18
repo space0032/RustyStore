@@ -14,12 +14,13 @@ use metadata::models::{ChunkReplicaRow, ChunkRow, StorageNodeRow};
 use metadata::{MetadataStore, ReplicationTaskRow};
 use proto::storage::{
     CapacityReport, ChunkLocation, ChunkReference, CompleteUploadRequest, CompleteUploadResponse,
-    CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse,
-    Empty, FileSummary, GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest,
-    GetManifestResponse, GetStatsRequest, GetStatsResponse, HealthCheckRequest,
-    HealthCheckResponse, HeartbeatRequest, HeartbeatResponse, ListFilesRequest, ListFilesResponse,
-    ListNodesRequest, ListNodesResponse, NodeInfo, RateLimitRequest, RateLimitResponse,
-    RegisterRequest, RegisterResponse, RetrieveChunkRequest, StoreChunkRequest,
+    CoordinatorInfo, CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteFileRequest,
+    DeleteFileResponse, Empty, FileSummary, GetChunkPlanRequest, GetChunkPlanResponse,
+    GetManifestRequest, GetManifestResponse, GetStatsRequest, GetStatsResponse, HealthCheckRequest,
+    HealthCheckResponse, HeartbeatRequest, HeartbeatResponse, ListCoordinatorsRequest,
+    ListCoordinatorsResponse, ListFilesRequest, ListFilesResponse, ListNodesRequest,
+    ListNodesResponse, NodeInfo, RateLimitRequest, RateLimitResponse, RegisterRequest,
+    RegisterResponse, RetrieveChunkRequest, StoreChunkRequest,
     chunk_service_client::ChunkServiceClient,
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::NodeService,
@@ -50,6 +51,12 @@ const LEADERSHIP_LEASE_MS: i64 = 15_000;
 const STALE_REPLICATION_TASK_SECS: i64 = 300;
 /// Unused rate-limit buckets are discarded after this long.
 const RATE_LIMIT_BUCKET_TTL_SECS: i64 = 3600;
+/// How often a coordinator renews its discovery registration.
+const REGISTRY_RENEW_INTERVAL: Duration = Duration::from_secs(5);
+/// Discovery registration lease duration.
+const REGISTRY_LEASE_MS: i64 = 15_000;
+/// Expired discovery rows are removed after this long.
+const REGISTRY_TTL_SECS: i64 = 3600;
 
 /// Delay needed to transfer `bytes` at the configured rate, if any.
 fn throttle_delay(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) -> Option<Duration> {
@@ -199,6 +206,8 @@ pub struct Coordinator {
     recovery_scheduler_handle: Option<JoinHandle<()>>,
     #[allow(dead_code)]
     orphan_gc_handle: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
+    registry_handle: Option<JoinHandle<()>>,
 }
 
 impl Coordinator {
@@ -211,6 +220,7 @@ impl Coordinator {
         recovery_bandwidth_bytes_per_sec: Option<u64>,
         recovery_aggregate_bytes_per_sec: Option<u64>,
         recovery_priority_aging_secs: i64,
+        advertise_addr: String,
     ) -> Self {
         let service = CoordinatorService::new(store.clone(), replication_factor, chunk_size_bytes);
         let is_leader = Arc::new(AtomicBool::new(false));
@@ -219,6 +229,24 @@ impl Coordinator {
         let aggregate_throttle = recovery_aggregate_bytes_per_sec
             .filter(|rate| *rate > 0)
             .map(|rate| Arc::new(AggregateThrottle::new(rate)));
+
+        // Register this coordinator for gateway discovery. Every coordinator
+        // serves RPCs, so registration is independent of leadership.
+        let registry = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(REGISTRY_RENEW_INTERVAL);
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = store
+                        .upsert_coordinator(leader_id, &advertise_addr, REGISTRY_LEASE_MS)
+                        .await
+                    {
+                        warn!("coordinator registry heartbeat error: {e}");
+                    }
+                }
+            })
+        };
 
         // Leadership: only the coordinator holding the database lease runs
         // background work. Every coordinator can serve gateway RPCs, so the
@@ -311,6 +339,10 @@ impl Coordinator {
                         {
                             warn!("rate limit bucket cleanup error: {e}");
                         }
+                        if let Err(e) = store.cleanup_coordinator_registry(REGISTRY_TTL_SECS).await
+                        {
+                            warn!("coordinator registry cleanup error: {e}");
+                        }
                     }
                     if let Ok(nodes) = store.healthy_nodes().await {
                         observability::ACTIVE_NODES.set(nodes.len() as i64);
@@ -394,6 +426,7 @@ impl Coordinator {
             replication_monitor_handle: Some(replication_monitor),
             recovery_scheduler_handle: Some(recovery_scheduler),
             orphan_gc_handle: orphan_gc,
+            registry_handle: Some(registry),
         }
     }
 
@@ -1308,6 +1341,27 @@ impl ClusterService for CoordinatorService {
                     healthy: n.healthy,
                     available_bytes: n.available_bytes,
                     capacity_bytes: n.capacity_bytes,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn list_coordinators(
+        &self,
+        _request: Request<ListCoordinatorsRequest>,
+    ) -> Result<Response<ListCoordinatorsResponse>, Status> {
+        let coordinators = self
+            .store
+            .live_coordinators()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(ListCoordinatorsResponse {
+            coordinators: coordinators
+                .into_iter()
+                .map(|c| CoordinatorInfo {
+                    coordinator_id: c.coordinator_id.to_string(),
+                    grpc_addr: c.grpc_addr,
                 })
                 .collect(),
         }))

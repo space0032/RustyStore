@@ -42,6 +42,20 @@ pub async fn run(
             .with_max_upload_bytes(max_upload_bytes),
     );
 
+    // Bootstrap from COORDINATOR_ADDRS, then keep the pool fresh from the
+    // database-backed coordinator registry.
+    let discovery_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            let added = discovery_state.refresh_coordinators().await;
+            if added > 0 {
+                info!("discovered {added} new coordinator endpoint(s)");
+            }
+        }
+    });
+
     // Register Prometheus collectors (idempotent).
     observability::register_metrics()?;
 

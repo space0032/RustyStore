@@ -23,6 +23,17 @@ CREATE TABLE IF NOT EXISTS coordinator_leader (
 -- Existing deployments created before the fencing epoch was added.
 ALTER TABLE coordinator_leader ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 0;
 
+-- Live coordinator registry used by gateways for endpoint discovery.
+CREATE TABLE IF NOT EXISTS coordinator_registry (
+  coordinator_id UUID PRIMARY KEY,
+  grpc_addr      TEXT NOT NULL,
+  lease_expiry   TIMESTAMPTZ NOT NULL,
+  last_seen      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_coordinator_registry_lease
+  ON coordinator_registry(lease_expiry);
+
 -- storage nodes
 CREATE TABLE IF NOT EXISTS storage_nodes (
   node_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -22,8 +22,9 @@ use proto::storage::{
     ChunkLocation, CompleteUploadRequest, CompleteUploadResponse, CreateUploadSessionRequest,
     CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse, FileSummary,
     GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
-    GetStatsRequest, GetStatsResponse, ListFilesRequest, ListFilesResponse, ListNodesRequest,
-    ListNodesResponse, NodeInfo, RateLimitRequest, RateLimitResponse,
+    GetStatsRequest, GetStatsResponse, ListCoordinatorsRequest, ListCoordinatorsResponse,
+    ListFilesRequest, ListFilesResponse, ListNodesRequest, ListNodesResponse, NodeInfo,
+    RateLimitRequest, RateLimitResponse,
 };
 
 // Deliberately different from the gateway's old hardcoded values (4 MB / 3) so
@@ -271,6 +272,15 @@ impl ClusterService for FakeCoordinator {
                 available_bytes: 1 << 30,
                 capacity_bytes: 1 << 30,
             }],
+        }))
+    }
+
+    async fn list_coordinators(
+        &self,
+        _request: GrpcRequest<ListCoordinatorsRequest>,
+    ) -> Result<GrpcResponse<ListCoordinatorsResponse>, Status> {
+        Ok(GrpcResponse::new(ListCoordinatorsResponse {
+            coordinators: Vec::new(),
         }))
     }
 

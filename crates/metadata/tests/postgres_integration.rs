@@ -36,7 +36,7 @@ async fn setup() -> Option<(MetadataStore, MutexGuard<'static, ()>)> {
         .expect("connect to TEST_DATABASE_URL");
 
     sqlx::raw_sql(
-        "TRUNCATE rate_limit_buckets, coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
+        "TRUNCATE coordinator_registry, rate_limit_buckets, coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
     )
     .execute(store.pool())
     .await
@@ -652,6 +652,57 @@ async fn shared_rate_limit_buckets_enforce_burst_per_key() {
 
     let removed = store.cleanup_rate_limit_buckets(-1).await.unwrap();
     assert_eq!(removed, 2, "all existing buckets are stale");
+}
+
+#[tokio::test]
+async fn coordinator_registry_reports_only_live_rows() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    store
+        .upsert_coordinator(first, "http://coordinator-a:50051", 15_000)
+        .await
+        .unwrap();
+    store
+        .upsert_coordinator(second, "http://coordinator-b:50051", 15_000)
+        .await
+        .unwrap();
+
+    let live = store.live_coordinators().await.unwrap();
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[0].grpc_addr, "http://coordinator-a:50051");
+    assert_eq!(live[1].grpc_addr, "http://coordinator-b:50051");
+
+    store
+        .upsert_coordinator(first, "http://coordinator-a-new:50051", 15_000)
+        .await
+        .unwrap();
+    let live = store.live_coordinators().await.unwrap();
+    assert!(
+        live.iter()
+            .any(|row| row.grpc_addr == "http://coordinator-a-new:50051"),
+        "heartbeat updates the advertised address"
+    );
+
+    sqlx::query(
+        "UPDATE coordinator_registry SET lease_expiry = now() - INTERVAL '2 hours' \
+         WHERE coordinator_id=$1",
+    )
+    .bind(first)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let live = store.live_coordinators().await.unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].coordinator_id, second);
+
+    assert_eq!(
+        store.cleanup_coordinator_registry(3600).await.unwrap(),
+        1,
+        "only long-expired registry rows are removed"
+    );
 }
 
 #[tokio::test]

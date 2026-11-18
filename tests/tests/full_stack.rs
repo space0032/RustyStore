@@ -110,7 +110,7 @@ async fn start_stack(replication_factor: i32, node_count: usize) -> Option<TestS
         .await
         .expect("connect database");
     sqlx::raw_sql(
-        "TRUNCATE coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
+        "TRUNCATE coordinator_registry, coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
     )
     .execute(&pool)
     .await

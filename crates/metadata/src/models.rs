@@ -22,6 +22,15 @@ pub struct StorageNodeRow {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A live coordinator advertised for gateway discovery.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CoordinatorRow {
+    pub coordinator_id: Uuid,
+    pub grpc_addr: String,
+    pub lease_expiry: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
 /// A file manifest (committed files only are readable).
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FileRow {

@@ -158,6 +158,62 @@ impl MetadataStore {
         Ok(row.and_then(|(id, epoch)| (id == leader_id).then_some(epoch)))
     }
 
+    // ---- coordinators ----------------------------------------------------
+
+    /// Advertise this coordinator and renew its discovery lease.
+    pub async fn upsert_coordinator(
+        &self,
+        coordinator_id: Uuid,
+        grpc_addr: &str,
+        ttl_ms: i64,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO coordinator_registry
+              (coordinator_id, grpc_addr, lease_expiry, last_seen)
+            VALUES ($1, $2, now() + ($3 * INTERVAL '1 millisecond'), now())
+            ON CONFLICT (coordinator_id) DO UPDATE SET
+              grpc_addr=EXCLUDED.grpc_addr,
+              lease_expiry=EXCLUDED.lease_expiry,
+              last_seen=now()
+            "#,
+        )
+        .bind(coordinator_id)
+        .bind(grpc_addr)
+        .bind(ttl_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Return coordinators whose discovery lease has not expired.
+    pub async fn live_coordinators(&self) -> sqlx::Result<Vec<CoordinatorRow>> {
+        sqlx::query_as(
+            r#"
+            SELECT coordinator_id, grpc_addr, lease_expiry, last_seen
+            FROM coordinator_registry
+            WHERE lease_expiry > now()
+            ORDER BY grpc_addr ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Remove registry rows that have been expired for longer than `stale_secs`.
+    pub async fn cleanup_coordinator_registry(&self, stale_secs: i64) -> sqlx::Result<u64> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM coordinator_registry
+            WHERE lease_expiry < now() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(stale_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     // ---- nodes -----------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
