@@ -68,6 +68,25 @@ impl S3ChunkStore {
         })
     }
 
+    /// Create the configured bucket if it does not exist (idempotent).
+    ///
+    /// Useful for local MinIO bootstrap and integration tests. Existing
+    /// buckets are left untouched.
+    pub async fn ensure_bucket(&self) -> StoreResult<()> {
+        match self.client.head_bucket().bucket(&self.bucket).send().await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                self.client
+                    .create_bucket()
+                    .bucket(&self.bucket)
+                    .send()
+                    .await
+                    .map_err(|e| RustyStoreError::Internal(e.to_string()))?;
+                Ok(())
+            }
+        }
+    }
+
     fn object_key(&self, chunk_id: &str) -> String {
         if self.base_prefix.is_empty() {
             chunk_id.to_string()

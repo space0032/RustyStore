@@ -34,6 +34,26 @@ impl CoordinatorServer {
         chunk_size_bytes: i64,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        Self::serve_with_listener(
+            listener,
+            store,
+            replication_factor,
+            chunk_size_bytes,
+            shutdown,
+        )
+        .await
+    }
+
+    /// Serve on an already-bound listener until `shutdown` resolves. Useful for
+    /// embedding and for tests that need an ephemeral port.
+    pub async fn serve_with_listener(
+        listener: tokio::net::TcpListener,
+        store: Arc<MetadataStore>,
+        replication_factor: i32,
+        chunk_size_bytes: i64,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let coordinator = Coordinator::new(
             store,
             replication_factor,
@@ -44,7 +64,10 @@ impl CoordinatorServer {
 
         tonic::transport::Server::builder()
             .add_service(svc.into_server())
-            .serve_with_shutdown(addr, shutdown)
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                shutdown,
+            )
             .await?;
 
         // Background tasks run as long as the Coordinator is alive.

@@ -56,6 +56,16 @@ fn decode_file_cursor(cursor: &str) -> Result<(i64, Uuid), Status> {
     Ok((micros, file_id))
 }
 
+/// Build a gRPC endpoint from a node address, tolerating addresses that
+/// already carry an `http(s)://` scheme.
+fn node_endpoint(addr: &str) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
+    }
+}
+
 /// Order the replicas to try as recovery sources.
 ///
 /// The task's recorded source is preferred, then any other healthy durable
@@ -452,7 +462,7 @@ impl Coordinator {
         chunk_row: &ChunkRow,
         chunk_data: &[u8],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let target_addr = format!("http://{}", target_node.grpc_addr);
+        let target_addr = node_endpoint(&target_node.grpc_addr);
         let mut target_client = ChunkServiceClient::connect(target_addr).await?;
 
         let meta = StoreChunkRequest {
@@ -501,7 +511,7 @@ impl Coordinator {
         chunk_id: Uuid,
         expected_sha256: &str,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        let source_addr = format!("http://{}", source_node.grpc_addr);
+        let source_addr = node_endpoint(&source_node.grpc_addr);
         let mut source_client = ChunkServiceClient::connect(source_addr).await?;
 
         let retrieve_req = RetrieveChunkRequest {
@@ -608,7 +618,7 @@ impl Coordinator {
         };
 
         // Connect to source node and retrieve chunk data via streaming gRPC.
-        let source_addr = format!("http://{}", source_node.grpc_addr);
+        let source_addr = node_endpoint(&source_node.grpc_addr);
         let mut source_client = ChunkServiceClient::connect(source_addr).await?;
 
         let retrieve_req = RetrieveChunkRequest {
@@ -652,7 +662,7 @@ impl Coordinator {
         }
 
         // Connect to target node and push chunk data via streaming gRPC.
-        let target_addr = format!("http://{}", target_node.grpc_addr);
+        let target_addr = node_endpoint(&target_node.grpc_addr);
         let mut target_client = ChunkServiceClient::connect(target_addr).await?;
 
         let meta = StoreChunkRequest {
@@ -1252,7 +1262,9 @@ impl CoordinatorServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_file_cursor, encode_file_cursor, source_candidates, target_candidates};
+    use super::{
+        decode_file_cursor, encode_file_cursor, node_endpoint, source_candidates, target_candidates,
+    };
     use chrono::{TimeZone, Utc};
     use metadata::models::ChunkReplicaRow;
     use std::collections::HashSet;
@@ -1369,5 +1381,12 @@ mod tests {
         let replicas = vec![replica(source, true), replica(target, true)];
 
         assert!(target_candidates(target, &healthy, &replicas, source).is_empty());
+    }
+
+    #[test]
+    fn node_endpoint_adds_scheme_only_when_missing() {
+        assert_eq!(node_endpoint("node:50051"), "http://node:50051");
+        assert_eq!(node_endpoint("http://node:50051"), "http://node:50051");
+        assert_eq!(node_endpoint("https://node:50051"), "https://node:50051");
     }
 }

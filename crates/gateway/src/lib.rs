@@ -111,3 +111,25 @@ pub async fn run(
 pub fn router(state: Arc<AppState>) -> Router {
     routes::routes(state)
 }
+
+/// Normalize a storage-node address into a gRPC endpoint, tolerating
+/// addresses that already carry an `http(s)://` scheme.
+pub(crate) fn grpc_endpoint(addr: &str) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::grpc_endpoint;
+
+    #[test]
+    fn adds_scheme_only_when_missing() {
+        assert_eq!(grpc_endpoint("node:50051"), "http://node:50051");
+        assert_eq!(grpc_endpoint("http://node:50051"), "http://node:50051");
+        assert_eq!(grpc_endpoint("https://node:50051"), "https://node:50051");
+    }
+}
