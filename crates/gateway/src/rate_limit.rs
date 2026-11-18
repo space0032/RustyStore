@@ -1,8 +1,11 @@
 //! Per-client-IP rate limiting middleware.
 //!
-//! A token-bucket limiter keyed by client IP. When the bucket is empty the
-//! request is rejected with `429 Too Many Requests`. Health and metrics
-//! endpoints are always exempt so probes and scrapers are never throttled.
+//! Requests are checked against the coordinator's shared token-bucket limiter,
+//! so bursts are bounded across gateway replicas instead of per process. If the
+//! coordinator is unreachable the gateway falls back to its local bucket rather
+//! than failing every request. When either bucket is empty the request is
+//! rejected with `429 Too Many Requests`. Health and metrics endpoints are
+//! always exempt so probes and scrapers are never throttled.
 //!
 //! Configure via `RATE_LIMIT_RPS` (0 disables limiting, the default) and
 //! `RATE_LIMIT_BURST` (defaults to twice the RPS).
@@ -17,6 +20,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use crate::AppState;
 
 /// Rate limiting configuration.
 #[derive(Clone, Copy, Debug)]
@@ -96,9 +101,71 @@ impl RateLimiter {
     }
 }
 
+/// Result of a shared rate-limit check.
+#[derive(Clone, Copy, Debug)]
+pub struct RateDecision {
+    pub allowed: bool,
+    pub retry_after_ms: u64,
+}
+
+/// Cluster-wide limiter backed by the coordinator, with a local fallback.
+#[derive(Clone)]
+pub struct SharedRateLimiter {
+    config: RateLimitConfig,
+    local: Arc<RateLimiter>,
+    state: Arc<AppState>,
+}
+
+impl SharedRateLimiter {
+    pub fn new(config: RateLimitConfig, state: Arc<AppState>) -> Self {
+        Self {
+            local: Arc::new(RateLimiter::new(config.rps, config.burst)),
+            config,
+            state,
+        }
+    }
+
+    pub async fn check(&self, ip: IpAddr) -> RateDecision {
+        if !self.config.is_enabled() {
+            return RateDecision {
+                allowed: true,
+                retry_after_ms: 0,
+            };
+        }
+
+        match self.state.coord_client().await {
+            Ok(mut client) => {
+                match client
+                    .check_rate_limit(&ip.to_string(), self.config.rps, self.config.burst)
+                    .await
+                {
+                    Ok((allowed, retry_after_ms)) => {
+                        return RateDecision {
+                            allowed,
+                            retry_after_ms,
+                        };
+                    }
+                    Err(e) => {
+                        tracing::debug!("shared rate limiter unavailable, using local bucket: {e}")
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("shared rate limiter unavailable, using local bucket: {e}")
+            }
+        }
+
+        let allowed = self.local.try_acquire(ip);
+        RateDecision {
+            allowed,
+            retry_after_ms: if allowed { 0 } else { 1000 },
+        }
+    }
+}
+
 /// Middleware enforcing the per-IP rate limit.
 pub async fn rate_limit_middleware(
-    State(limiter): State<Arc<RateLimiter>>,
+    State(limiter): State<Arc<SharedRateLimiter>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -113,12 +180,14 @@ pub async fn rate_limit_middleware(
         .map(|ci| ci.0.ip())
         .unwrap_or(IpAddr::from([0, 0, 0, 0]));
 
-    if limiter.try_acquire(ip) {
+    let decision = limiter.check(ip).await;
+    if decision.allowed {
         next.run(request).await
     } else {
+        let retry_after = decision.retry_after_ms.div_ceil(1000).max(1).to_string();
         (
             StatusCode::TOO_MANY_REQUESTS,
-            [("retry-after", "1")],
+            [("retry-after", retry_after)],
             "rate limit exceeded",
         )
             .into_response()

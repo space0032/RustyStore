@@ -18,8 +18,8 @@ use proto::storage::{
     Empty, FileSummary, GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest,
     GetManifestResponse, GetStatsRequest, GetStatsResponse, HealthCheckRequest,
     HealthCheckResponse, HeartbeatRequest, HeartbeatResponse, ListFilesRequest, ListFilesResponse,
-    ListNodesRequest, ListNodesResponse, NodeInfo, RegisterRequest, RegisterResponse,
-    RetrieveChunkRequest, StoreChunkRequest,
+    ListNodesRequest, ListNodesResponse, NodeInfo, RateLimitRequest, RateLimitResponse,
+    RegisterRequest, RegisterResponse, RetrieveChunkRequest, StoreChunkRequest,
     chunk_service_client::ChunkServiceClient,
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::NodeService,
@@ -48,6 +48,8 @@ const LEADERSHIP_LEASE_MS: i64 = 15_000;
 /// An `in_progress` recovery task untouched for this long is considered
 /// abandoned and is failed so a fresh task can be scheduled.
 const STALE_REPLICATION_TASK_SECS: i64 = 300;
+/// Unused rate-limit buckets are discarded after this long.
+const RATE_LIMIT_BUCKET_TTL_SECS: i64 = 3600;
 
 /// Delay needed to transfer `bytes` at the configured rate, if any.
 fn throttle_delay(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) -> Option<Duration> {
@@ -237,6 +239,12 @@ impl Coordinator {
                             }
                             Ok(_) => {}
                             Err(e) => warn!("stale replication task cleanup error: {e}"),
+                        }
+                        if let Err(e) = store
+                            .cleanup_rate_limit_buckets(RATE_LIMIT_BUCKET_TTL_SECS)
+                            .await
+                        {
+                            warn!("rate limit bucket cleanup error: {e}");
                         }
                     }
                     if let Ok(nodes) = store.healthy_nodes().await {
@@ -1194,6 +1202,34 @@ impl ClusterService for CoordinatorService {
             total_files: 0,
             total_chunks: 0,
             under_replicated_chunks: 0,
+        }))
+    }
+
+    async fn check_rate_limit(
+        &self,
+        request: Request<RateLimitRequest>,
+    ) -> Result<Response<RateLimitResponse>, Status> {
+        let req = request.into_inner();
+        if req.rps < 0 {
+            return Err(Status::invalid_argument("rps must not be negative"));
+        }
+        if req.rps > 0 && req.burst < 1 {
+            return Err(Status::invalid_argument("burst must be positive"));
+        }
+        let key = req.key.trim();
+        if req.rps > 0 && key.is_empty() {
+            return Err(Status::invalid_argument("rate limit key is required"));
+        }
+
+        let (allowed, retry_after_ms) = self
+            .store
+            .check_rate_limit(key, req.rps, req.burst)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(RateLimitResponse {
+            allowed,
+            retry_after_ms,
         }))
     }
 }

@@ -6,7 +6,7 @@
 use proto::storage::{
     ChunkManifest, CompleteUploadRequest, CreateUploadSessionRequest, DeleteFileRequest,
     GetChunkPlanRequest, GetManifestRequest, GetStatsRequest, ListFilesRequest, ListNodesRequest,
-    cluster_service_client::ClusterServiceClient,
+    RateLimitRequest, cluster_service_client::ClusterServiceClient,
 };
 use std::future::Future;
 use std::io;
@@ -367,6 +367,31 @@ impl CoordinatorClient {
                 capacity_bytes: n.capacity_bytes,
             })
             .collect())
+    }
+
+    /// Consume one token from the cluster-wide rate limiter for `key`.
+    pub async fn check_rate_limit(
+        &mut self,
+        key: &str,
+        rps: u32,
+        burst: u32,
+    ) -> Result<(bool, u64), Box<dyn std::error::Error + Send + Sync>> {
+        let resp = self
+            .with_retry(|inner| {
+                let req = request_with_id(RateLimitRequest {
+                    key: key.to_string(),
+                    rps: rps.min(i32::MAX as u32) as i32,
+                    burst: burst.min(i32::MAX as u32) as i32,
+                });
+                Box::pin(async move {
+                    inner
+                        .check_rate_limit(req)
+                        .await
+                        .map(|response| response.into_inner())
+                })
+            })
+            .await?;
+        Ok((resp.allowed, resp.retry_after_ms.max(0) as u64))
     }
 
     pub async fn get_stats(

@@ -109,3 +109,13 @@ CREATE INDEX IF NOT EXISTS idx_replication_tasks_status ON replication_tasks(sta
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_queue ON replication_tasks(status, priority DESC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_target ON replication_tasks(target_node_id);
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_chunk ON replication_tasks(chunk_id);
+
+-- Shared rate-limit buckets (gateway replicas consult the coordinator).
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  key        TEXT PRIMARY KEY,
+  tokens     DOUBLE PRECISION NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_updated
+  ON rate_limit_buckets(updated_at);

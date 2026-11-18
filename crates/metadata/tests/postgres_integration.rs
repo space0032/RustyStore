@@ -36,7 +36,7 @@ async fn setup() -> Option<(MetadataStore, MutexGuard<'static, ()>)> {
         .expect("connect to TEST_DATABASE_URL");
 
     sqlx::raw_sql(
-        "TRUNCATE coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
+        "TRUNCATE rate_limit_buckets, coordinator_leader, replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
     )
     .execute(store.pool())
     .await
@@ -509,6 +509,39 @@ async fn replication_task_priority_order_and_actual_nodes() {
     assert_eq!(status, "done");
     assert_eq!(source, Some(n2), "actual source is persisted");
     assert_eq!(target, n3, "actual target is persisted");
+}
+
+#[tokio::test]
+async fn shared_rate_limit_buckets_enforce_burst_per_key() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+
+    assert_eq!(
+        store.check_rate_limit("client-a", 1, 2).await.unwrap(),
+        (true, 0)
+    );
+    assert_eq!(
+        store.check_rate_limit("client-a", 1, 2).await.unwrap(),
+        (true, 0)
+    );
+
+    let (allowed, retry_after_ms) = store.check_rate_limit("client-a", 1, 2).await.unwrap();
+    assert!(!allowed, "third request exceeds the burst");
+    assert!(retry_after_ms > 0, "a retry delay is returned");
+
+    assert!(
+        store.check_rate_limit("client-b", 1, 2).await.unwrap().0,
+        "buckets are independent per key"
+    );
+    assert_eq!(
+        store.check_rate_limit("disabled", 0, 0).await.unwrap(),
+        (true, 0),
+        "rps=0 bypasses the limiter"
+    );
+
+    let removed = store.cleanup_rate_limit_buckets(-1).await.unwrap();
+    assert_eq!(removed, 2, "all existing buckets are stale");
 }
 
 #[tokio::test]

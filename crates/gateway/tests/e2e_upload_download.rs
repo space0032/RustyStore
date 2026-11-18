@@ -23,7 +23,7 @@ use proto::storage::{
     CreateUploadSessionResponse, DeleteFileRequest, DeleteFileResponse, FileSummary,
     GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest, GetManifestResponse,
     GetStatsRequest, GetStatsResponse, ListFilesRequest, ListFilesResponse, ListNodesRequest,
-    ListNodesResponse, NodeInfo,
+    ListNodesResponse, NodeInfo, RateLimitRequest, RateLimitResponse,
 };
 
 // Deliberately different from the gateway's old hardcoded values (4 MB / 3) so
@@ -287,6 +287,16 @@ impl ClusterService for FakeCoordinator {
             total_files: state.files.len() as i64,
             total_chunks: state.files.values().map(|f| f.chunks.len() as i64).sum(),
             under_replicated_chunks: 0,
+        }))
+    }
+
+    async fn check_rate_limit(
+        &self,
+        _request: GrpcRequest<RateLimitRequest>,
+    ) -> Result<GrpcResponse<RateLimitResponse>, Status> {
+        Ok(GrpcResponse::new(RateLimitResponse {
+            allowed: true,
+            retry_after_ms: 0,
         }))
     }
 }

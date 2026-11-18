@@ -44,6 +44,82 @@ impl MetadataStore {
             .map(|_| ())
     }
 
+    // ---- shared rate limiting -------------------------------------------
+
+    /// Consume one token from the shared bucket for `key`.
+    ///
+    /// Returns `(allowed, retry_after_ms)`. The row is locked for the
+    /// read-modify-write so gateway replicas cannot over-admit a burst. An
+    /// `rps` of zero is a no-op and always allows.
+    pub async fn check_rate_limit(
+        &self,
+        key: &str,
+        rps: i32,
+        burst: i32,
+    ) -> sqlx::Result<(bool, i64)> {
+        if rps <= 0 {
+            return Ok((true, 0));
+        }
+
+        let capacity = f64::from(burst.max(1));
+        let refill = f64::from(rps);
+        let mut tx = self.pool.begin().await?;
+
+        let existing: Option<(f64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT tokens, updated_at FROM rate_limit_buckets WHERE key=$1 FOR UPDATE",
+        )
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let now = chrono::Utc::now();
+        let mut tokens = match existing {
+            Some((tokens, updated_at)) => {
+                let elapsed = (now - updated_at).num_milliseconds().max(0) as f64 / 1000.0;
+                (tokens + elapsed * refill).min(capacity)
+            }
+            None => capacity,
+        };
+
+        let allowed = tokens >= 1.0;
+        let retry_after_ms = if allowed {
+            tokens -= 1.0;
+            0
+        } else {
+            (((1.0 - tokens) / refill) * 1000.0).ceil().max(1.0) as i64
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO rate_limit_buckets (key, tokens, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (key) DO UPDATE SET tokens=EXCLUDED.tokens, updated_at=now()
+            "#,
+        )
+        .bind(key)
+        .bind(tokens)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((allowed, retry_after_ms))
+    }
+
+    /// Remove buckets that have not been used recently. Buckets are
+    /// reconstructible, so this only bounds table growth.
+    pub async fn cleanup_rate_limit_buckets(&self, stale_secs: i64) -> sqlx::Result<u64> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM rate_limit_buckets
+            WHERE updated_at < now() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(stale_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     // ---- coordinator leadership -----------------------------------------
 
     /// Try to acquire or renew the coordinator leadership lease.

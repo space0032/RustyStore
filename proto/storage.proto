@@ -144,6 +144,8 @@ service ClusterService {
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  // Shared token-bucket limiter keyed by client identity (usually IP).
+  rpc CheckRateLimit(RateLimitRequest) returns (RateLimitResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +267,18 @@ message NodeInfo {
   bool healthy = 4;
   int64 available_bytes = 5;
   int64 capacity_bytes = 6;
+}
+
+message RateLimitRequest {
+  string key = 1;       // Client identity; the gateway uses the client IP.
+  int32 rps = 2;        // Sustained refill rate; 0 allows without state.
+  int32 burst = 3;      // Bucket capacity.
+}
+
+message RateLimitResponse {
+  bool allowed = 1;
+  // Minimum wait before retrying when rejected, in milliseconds.
+  int64 retry_after_ms = 2;
 }
 
 message GetStatsRequest {}

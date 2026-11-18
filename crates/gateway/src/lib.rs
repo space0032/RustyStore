@@ -19,7 +19,9 @@ mod routes;
 
 pub use app::AppState;
 pub use auth::{AuthConfig, auth_middleware};
-pub use rate_limit::{RateLimitConfig, RateLimiter, rate_limit_middleware};
+pub use rate_limit::{
+    RateDecision, RateLimitConfig, RateLimiter, SharedRateLimiter, rate_limit_middleware,
+};
 pub use request_id::{REQUEST_ID_HEADER, request_id_middleware, resolve_request_id};
 
 use axum::Router;
@@ -47,7 +49,7 @@ pub async fn run(
     // values fail startup instead of silently weakening protection.
     let auth_config = Arc::new(AuthConfig::try_from_env()?);
     let rate_config = RateLimitConfig::try_from_env()?;
-    let rate_limiter = Arc::new(RateLimiter::new(rate_config.rps, rate_config.burst));
+    let rate_limiter = Arc::new(SharedRateLimiter::new(rate_config, Arc::clone(&state)));
 
     let app = Router::new()
         .merge(routes::routes(Arc::clone(&state)))
