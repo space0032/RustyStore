@@ -114,6 +114,13 @@ on healthy nodes and deleting any that have no metadata row and are older than
 `UPLOAD_SESSION_TTL_SECS`. Set `ORPHAN_GC_INTERVAL_SECS=0` to disable the
 collector.
 
+Rate limiting is shared across gateway replicas: each request consumes a token
+from a PostgreSQL-backed bucket through the coordinator's `CheckRateLimit` RPC.
+`RATE_LIMIT_RPS=0` disables limiting; `RATE_LIMIT_BURST` defaults to twice the
+RPS. If the coordinator is unreachable, the gateway falls back to its local
+per-IP bucket instead of failing requests. Health and metrics endpoints are
+exempt.
+
 Recovery treats a task's recorded source and target as hints. Sources are raced
 in parallel: if the recorded source is unhealthy, unreachable, or returns bytes
 that fail SHA-256 verification, the first other healthy durable replica to

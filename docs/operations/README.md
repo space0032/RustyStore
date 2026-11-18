@@ -35,6 +35,15 @@ through a TLS-terminating proxy.
 - Coordinator: `GET /health` (liveness), `GET /ready` (database probe) on port 8081
 - Storage node: `GET /health` (liveness), `GET /ready` (storage volume probe) on port 8082
 
+## Rate limiting
+
+Gateway replicas share token buckets through the coordinator. Set
+`RATE_LIMIT_RPS` above zero to enable limiting and `RATE_LIMIT_BURST` to bound
+bursts (default `2 * RPS`). The coordinator stores buckets in PostgreSQL and
+expires unused keys after one hour. If the coordinator is unavailable the
+gateway falls back to its local bucket, so a coordinator outage degrades from
+cluster-wide to per-process limiting rather than failing all requests.
+
 ## Simulating failure
 
 ```bash
