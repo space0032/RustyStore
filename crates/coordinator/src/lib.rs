@@ -6,6 +6,7 @@
 //! under-replication detection, and recovery scheduling.
 
 mod client;
+pub mod gc;
 pub mod http;
 mod placement;
 mod server;
@@ -13,6 +14,7 @@ mod service;
 pub mod types;
 
 pub use client::CoordinatorClient;
+pub use gc::GcConfig;
 pub use placement::{PlacementResult, place_replicas};
 pub use server::CoordinatorServer;
 pub use service::{Coordinator, CoordinatorService};

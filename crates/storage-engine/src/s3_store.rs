@@ -6,10 +6,12 @@
 //! Enable with the `s3` feature flag:
 //!   cargo build --features storage-engine/s3
 
-use crate::chunk_store::{CapacityInfo, ChunkEntry, ChunkMeta, ChunkStore, StoreResult};
-use crate::common::error::RustyStoreError;
+use crate::chunk_store::{
+    CapacityInfo, ChunkEntry, ChunkMeta, ChunkStore, StoreResult, StoredChunkInfo,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
+use common::error::RustyStoreError;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
@@ -33,14 +35,16 @@ impl S3ChunkStore {
         secret_key: Option<&str>,
         region: Option<&str>,
     ) -> StoreResult<Self> {
+        use aws_config::BehaviorVersion;
         use aws_config::meta::region::RegionProviderChain;
-        use aws_sdk_s3::config::{Builder, Region};
+        use aws_sdk_s3::config::Region;
 
-        let region_provider = RegionProviderChain::first_try(region.map(Region::new))
-            .or_default_provider()
-            .or_else(Region::new("us-east-1"));
+        let region_provider =
+            RegionProviderChain::first_try(region.map(|r| Region::new(r.to_owned())))
+                .or_default_provider()
+                .or_else(Region::new("us-east-1"));
 
-        let sdk_config = aws_config::from_env()
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
             .region(region_provider)
             .endpoint_url(endpoint)
             .load()
@@ -103,7 +107,7 @@ impl ChunkStore for S3ChunkStore {
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
-            .body(body)
+            .body(body.into())
             .send()
             .await
             .map_err(|e| RustyStoreError::Internal(e.to_string()))?;
@@ -205,6 +209,62 @@ impl ChunkStore for S3ChunkStore {
         }
     }
 
+    async fn list_chunks(&self) -> StoreResult<Vec<StoredChunkInfo>> {
+        let prefix = if self.base_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.base_prefix)
+        };
+
+        let mut chunks = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut request = self.client.list_objects_v2().bucket(&self.bucket);
+            if !prefix.is_empty() {
+                request = request.prefix(&prefix);
+            }
+            if let Some(token) = continuation.take() {
+                request = request.continuation_token(token);
+            }
+
+            let response = request
+                .send()
+                .await
+                .map_err(|e| RustyStoreError::Internal(e.to_string()))?;
+
+            for object in response.contents() {
+                let Some(key) = object.key() else { continue };
+                let Some(chunk_id) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                if chunk_id.is_empty() || chunk_id.contains('/') {
+                    continue;
+                }
+                let modified_epoch_ms = object
+                    .last_modified()
+                    .map(|t| t.secs() * 1000 + i64::from(t.subsec_nanos()) / 1_000_000)
+                    .unwrap_or(0);
+                chunks.push(StoredChunkInfo {
+                    chunk_id: chunk_id.to_string(),
+                    size_bytes: object.size().unwrap_or(0).max(0) as u64,
+                    modified_epoch_ms,
+                });
+            }
+
+            if response.is_truncated().unwrap_or(false) {
+                continuation = response.next_continuation_token().map(ToString::to_string);
+                if continuation.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+        Ok(chunks)
+    }
+
     async fn chunk_exists(&self, chunk_id: &str) -> StoreResult<bool> {
         let key = self.object_key(chunk_id);
         self.client
@@ -223,7 +283,7 @@ impl ChunkStore for S3ChunkStore {
             })
             .or_else(|e| match e {
                 RustyStoreError::NotFound(_) => Ok(false),
-                Err(e) => Err(e),
+                other => Err(other),
             })
     }
 

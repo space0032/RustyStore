@@ -41,6 +41,18 @@ pub struct CapacityInfo {
     pub used_bytes: u64,
 }
 
+/// A chunk discovered by listing the store (no payload).
+///
+/// `modified_epoch_ms` is the last-modification time in Unix epoch
+/// milliseconds; the coordinator uses it to avoid reclaiming chunks that may
+/// still belong to an in-flight upload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredChunkInfo {
+    pub chunk_id: String,
+    pub size_bytes: u64,
+    pub modified_epoch_ms: i64,
+}
+
 #[async_trait]
 pub trait ChunkStore: Send + Sync {
     /// Store a chunk atomically (temp file → fsync → rename).
@@ -71,6 +83,12 @@ pub trait ChunkStore: Send + Sync {
 
     /// Check whether a chunk exists.
     async fn chunk_exists(&self, chunk_id: &str) -> StoreResult<bool>;
+
+    /// List all chunks currently stored (metadata only).
+    ///
+    /// Used by the coordinator's orphan-chunk garbage collector. Temporary
+    /// files from in-progress writes must not be reported.
+    async fn list_chunks(&self) -> StoreResult<Vec<StoredChunkInfo>>;
 
     /// Return disk capacity for the storage volume.
     async fn get_capacity(&self) -> StoreResult<CapacityInfo>;

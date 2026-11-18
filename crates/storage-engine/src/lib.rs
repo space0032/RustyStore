@@ -14,7 +14,9 @@ mod fs_store;
 #[cfg(feature = "s3")]
 mod s3_store;
 
-pub use chunk_store::{CapacityInfo, ChunkEntry, ChunkMeta, ChunkStore, StoreResult};
+pub use chunk_store::{
+    CapacityInfo, ChunkEntry, ChunkMeta, ChunkStore, StoreResult, StoredChunkInfo,
+};
 pub use fs_store::FsChunkStore;
 
 #[cfg(feature = "s3")]
@@ -154,6 +156,32 @@ mod tests {
         let (store, _dir) = test_store().await;
         let cap = store.get_capacity().await.expect("capacity should work");
         let _ = cap;
+    }
+
+    #[tokio::test]
+    async fn test_list_chunks_skips_temp_files() {
+        let (store, _dir) = test_store().await;
+
+        let a = b"chunk a".to_vec();
+        let b = b"chunk b payload".to_vec();
+        store
+            .store_chunk("chunk-a", &a, &FsChunkStore::sha256_hex(&a))
+            .await
+            .unwrap();
+        store
+            .store_chunk("chunk-b", &b, &FsChunkStore::sha256_hex(&b))
+            .await
+            .unwrap();
+
+        // A leftover temp file must never be reported as a stored chunk.
+        std::fs::write(store.temp_path("chunk-c"), b"partial").unwrap();
+
+        let listed = store.list_chunks().await.unwrap();
+        let ids: Vec<&str> = listed.iter().map(|c| c.chunk_id.as_str()).collect();
+        assert_eq!(ids, vec!["chunk-a", "chunk-b"]);
+        assert_eq!(listed[0].size_bytes, a.len() as u64);
+        assert_eq!(listed[1].size_bytes, b.len() as u64);
+        assert!(listed.iter().all(|c| c.modified_epoch_ms > 0));
     }
 
     #[tokio::test]

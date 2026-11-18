@@ -61,6 +61,30 @@ pub static STORAGE_CHUNKS_DELETED: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static ORPHAN_CHUNKS_DELETED: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "rustystore_orphan_chunks_deleted_total",
+        "Unreferenced chunk bytes reclaimed by the coordinator",
+    )
+    .unwrap()
+});
+
+pub static ORPHAN_BYTES_DELETED: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "rustystore_orphan_bytes_deleted_total",
+        "Unreferenced chunk bytes (size) reclaimed by the coordinator",
+    )
+    .unwrap()
+});
+
+pub static STALE_UPLOADS_REAPED: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "rustystore_stale_uploads_reaped_total",
+        "Abandoned upload sessions/files removed by the coordinator",
+    )
+    .unwrap()
+});
+
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -89,6 +113,9 @@ pub fn register_metrics() -> Result<(), Box<dyn std::error::Error>> {
     register(STORAGE_CHUNKS_STORED.clone())?;
     register(STORAGE_BYTES_STORED.clone())?;
     register(STORAGE_CHUNKS_DELETED.clone())?;
+    register(ORPHAN_CHUNKS_DELETED.clone())?;
+    register(ORPHAN_BYTES_DELETED.clone())?;
+    register(STALE_UPLOADS_REAPED.clone())?;
     Ok(())
 }
 
@@ -121,6 +148,9 @@ mod tests {
         STORAGE_CHUNKS_STORED.inc();
         STORAGE_BYTES_STORED.inc_by(16);
         STORAGE_CHUNKS_DELETED.inc();
+        ORPHAN_CHUNKS_DELETED.inc();
+        ORPHAN_BYTES_DELETED.inc_by(8);
+        STALE_UPLOADS_REAPED.inc();
 
         let text = prometheus_metrics();
         assert!(text.contains("rustystore_uploaded_bytes_total"), "{text}");
@@ -136,6 +166,18 @@ mod tests {
         );
         assert!(
             text.contains("rustystore_storage_chunks_deleted_total"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rustystore_orphan_chunks_deleted_total"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rustystore_orphan_bytes_deleted_total"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rustystore_stale_uploads_reaped_total"),
             "{text}"
         );
     }

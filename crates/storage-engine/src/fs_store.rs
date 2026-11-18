@@ -6,7 +6,9 @@
 //! chunk. Blocking filesystem calls are dispatched to `spawn_blocking` to
 //! avoid starving the Tokio runtime.
 
-use crate::chunk_store::{CapacityInfo, ChunkEntry, ChunkMeta, ChunkStore, StoreResult};
+use crate::chunk_store::{
+    CapacityInfo, ChunkEntry, ChunkMeta, ChunkStore, StoreResult, StoredChunkInfo,
+};
 use async_trait::async_trait;
 use common::error::RustyStoreError;
 use sha2::{Digest, Sha256};
@@ -224,6 +226,47 @@ impl ChunkStore for FsChunkStore {
     async fn chunk_exists(&self, chunk_id: &str) -> StoreResult<bool> {
         let path = self.chunk_path(chunk_id);
         Self::path_exists(&path).await
+    }
+
+    async fn list_chunks(&self) -> StoreResult<Vec<StoredChunkInfo>> {
+        let dir = self.storage_path.clone();
+        spawn_blocking(move || {
+            use std::time::UNIX_EPOCH;
+
+            let entries = std::fs::read_dir(&dir).map_err(RustyStoreError::Io)?;
+            let mut chunks = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(RustyStoreError::Io)?;
+                let file_type = entry.file_type().map_err(RustyStoreError::Io)?;
+                if !file_type.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(chunk_id) = name.to_str() else {
+                    continue;
+                };
+                // Skip in-progress writes (`<chunk_id>.tmp.<pid>`).
+                if chunk_id.contains(".tmp.") {
+                    continue;
+                }
+                let metadata = entry.metadata().map_err(RustyStoreError::Io)?;
+                let modified_epoch_ms = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                chunks.push(StoredChunkInfo {
+                    chunk_id: chunk_id.to_string(),
+                    size_bytes: metadata.len(),
+                    modified_epoch_ms,
+                });
+            }
+            chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+            Ok::<_, RustyStoreError>(chunks)
+        })
+        .await
+        .map_err(|e| RustyStoreError::Internal(e.to_string()))?
     }
 
     async fn get_capacity(&self) -> StoreResult<CapacityInfo> {

@@ -392,6 +392,23 @@ impl MetadataStore {
         Ok(row)
     }
 
+    /// Return the subset of `chunk_ids` that still have metadata rows.
+    ///
+    /// The orphan-chunk collector lists chunk bytes from storage nodes and
+    /// asks which of them are still referenced; anything absent is safe to
+    /// delete once it is older than the grace period.
+    pub async fn existing_chunk_ids(&self, chunk_ids: &[Uuid]) -> sqlx::Result<Vec<Uuid>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT chunk_id FROM chunks WHERE chunk_id = ANY($1)")
+                .bind(chunk_ids.to_vec())
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     // ---- replicas --------------------------------------------------------
 
     pub async fn insert_replica(
@@ -459,6 +476,47 @@ impl MetadataStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Reap upload sessions and files that never completed.
+    ///
+    /// A file only becomes `committed` in `CompleteUpload`; rows still in
+    /// `uploading` after `ttl_secs` are abandoned. Deleting the file cascades
+    /// its upload session and any chunk metadata. Chunk *bytes* from an
+    /// abandoned upload were never recorded in `chunks`, so they are reclaimed
+    /// by the orphan-chunk collector instead.
+    ///
+    /// Returns the number of files and file-less sessions removed.
+    pub async fn reap_stale_uploads(&self, ttl_secs: i64) -> sqlx::Result<u64> {
+        let mut tx = self.pool.begin().await?;
+
+        let files = sqlx::query(
+            r#"
+            DELETE FROM files
+            WHERE status='uploading'
+              AND updated_at < now() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(ttl_secs)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        let sessions = sqlx::query(
+            r#"
+            DELETE FROM upload_sessions
+            WHERE status='pending'
+              AND file_id IS NULL
+              AND created_at < now() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(ttl_secs)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        tx.commit().await?;
+        Ok(files + sessions)
     }
 
     // ---- replication tasks -----------------------------------------------

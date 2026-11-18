@@ -34,7 +34,12 @@ impl CoordinatorServer {
         chunk_size_bytes: i64,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let coordinator = Coordinator::new(store, replication_factor, chunk_size_bytes);
+        let coordinator = Coordinator::new(
+            store,
+            replication_factor,
+            chunk_size_bytes,
+            crate::gc::GcConfig::from_env()?,
+        );
         let svc = coordinator.service();
 
         tonic::transport::Server::builder()

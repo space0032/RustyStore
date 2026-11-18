@@ -112,6 +112,11 @@ impl StorageNode {
         self.inner.store.delete_chunk(chunk_id).await
     }
 
+    /// List stored chunks (metadata only), excluding in-progress temp files.
+    pub async fn list_chunks(&self) -> StoreResult<Vec<storage_engine::StoredChunkInfo>> {
+        self.inner.store.list_chunks().await
+    }
+
     /// Get the storage path.
     pub fn storage_path(&self) -> &std::path::Path {
         self.inner.store.storage_path()

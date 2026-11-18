@@ -4,6 +4,7 @@
 //! ClusterService (gateway-facing RPCs). Runs background tasks for lease
 //! expiry monitoring, under-replication detection, and recovery scheduling.
 
+use crate::gc::{self, GcConfig};
 use crate::placement::place_replicas;
 #[allow(unused_imports)]
 use crate::types::{ChunkLocationEntry, ChunkManifestEntry, ClusterStats, Manifest, NodeInfoEntry};
@@ -43,10 +44,17 @@ pub struct Coordinator {
     replication_monitor_handle: Option<JoinHandle<()>>,
     #[allow(dead_code)]
     recovery_scheduler_handle: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
+    orphan_gc_handle: Option<JoinHandle<()>>,
 }
 
 impl Coordinator {
-    pub fn new(store: Arc<MetadataStore>, replication_factor: i32, chunk_size_bytes: i64) -> Self {
+    pub fn new(
+        store: Arc<MetadataStore>,
+        replication_factor: i32,
+        chunk_size_bytes: i64,
+        gc_config: Option<GcConfig>,
+    ) -> Self {
         let service = CoordinatorService::new(store.clone(), replication_factor, chunk_size_bytes);
 
         // Lease expiry monitor: marks nodes unhealthy when lease expires.
@@ -106,11 +114,16 @@ impl Coordinator {
             })
         };
 
+        // Orphan-chunk collector: reclaims bytes with no metadata row and
+        // reaps uploads that never completed. Disabled when the interval is 0.
+        let orphan_gc = gc_config.map(|config| gc::spawn(store.clone(), config));
+
         Self {
             service,
             lease_monitor_handle: Some(lease_monitor),
             replication_monitor_handle: Some(replication_monitor),
             recovery_scheduler_handle: Some(recovery_scheduler),
+            orphan_gc_handle: orphan_gc,
         }
     }
 

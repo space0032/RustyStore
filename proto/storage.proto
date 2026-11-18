@@ -96,6 +96,17 @@ message DeleteChunkResponse {
   bool deleted = 1;
 }
 
+// Directory listing used by the coordinator's orphan-chunk garbage collector.
+// `modified_epoch_ms` lets the coordinator apply a grace period so chunks from
+// uploads that are still in flight are never reclaimed.
+message ListChunksRequest {}
+
+message ChunkSummary {
+  string chunk_id = 1;
+  int64 size_bytes = 2;
+  int64 modified_epoch_ms = 3;
+}
+
 // ---------------------------------------------------------------------------
 // Replication (coordinator -> storage node, and node -> node)
 // ---------------------------------------------------------------------------
@@ -136,6 +147,7 @@ service ChunkService {
   rpc StoreChunk(stream StoreChunkRequest) returns (StoreChunkResponse);
   rpc RetrieveChunk(RetrieveChunkRequest) returns (stream RetrieveChunkResponse);
   rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+  rpc ListChunks(ListChunksRequest) returns (stream ChunkSummary);
   rpc ReplicateChunk(stream ReplicateChunkRequest) returns (ReplicateChunkResponse);
 }
 

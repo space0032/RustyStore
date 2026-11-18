@@ -7,13 +7,14 @@
 use crate::StorageNode;
 use futures_util::stream::Stream;
 use proto::storage::{
-    CapacityReport, CompleteUploadRequest, CompleteUploadResponse, CreateUploadSessionRequest,
-    CreateUploadSessionResponse, DeleteChunkRequest, DeleteChunkResponse, DeleteFileRequest,
-    DeleteFileResponse, Empty, GetChunkPlanRequest, GetChunkPlanResponse, GetManifestRequest,
-    GetManifestResponse, GetStatsRequest, GetStatsResponse, HealthCheckRequest,
-    HealthCheckResponse, HeartbeatRequest, HeartbeatResponse, ListNodesRequest, ListNodesResponse,
-    RegisterRequest, RegisterResponse, ReplicateChunkRequest, ReplicateChunkResponse,
-    RetrieveChunkRequest, RetrieveChunkResponse, StoreChunkRequest, StoreChunkResponse,
+    CapacityReport, ChunkSummary, CompleteUploadRequest, CompleteUploadResponse,
+    CreateUploadSessionRequest, CreateUploadSessionResponse, DeleteChunkRequest,
+    DeleteChunkResponse, DeleteFileRequest, DeleteFileResponse, Empty, GetChunkPlanRequest,
+    GetChunkPlanResponse, GetManifestRequest, GetManifestResponse, GetStatsRequest,
+    GetStatsResponse, HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, HeartbeatResponse,
+    ListChunksRequest, ListNodesRequest, ListNodesResponse, RegisterRequest, RegisterResponse,
+    ReplicateChunkRequest, ReplicateChunkResponse, RetrieveChunkRequest, RetrieveChunkResponse,
+    StoreChunkRequest, StoreChunkResponse,
     chunk_service_server::{ChunkService, ChunkServiceServer},
     cluster_service_server::{ClusterService, ClusterServiceServer},
     node_service_server::{NodeService, NodeServiceServer},
@@ -90,6 +91,7 @@ impl NodeService for StorageNodeService {
 #[tonic::async_trait]
 impl ChunkService for StorageNodeService {
     type RetrieveChunkStream = BoxStream<RetrieveChunkResponse>;
+    type ListChunksStream = BoxStream<ChunkSummary>;
 
     async fn store_chunk(
         &self,
@@ -224,6 +226,29 @@ impl ChunkService for StorageNodeService {
     ) -> Result<Response<ReplicateChunkResponse>, Status> {
         Err(Status::unimplemented("replicate_chunk not yet implemented"))
     }
+
+    async fn list_chunks(
+        &self,
+        _request: Request<ListChunksRequest>,
+    ) -> Result<Response<Self::ListChunksStream>, Status> {
+        let chunks = self
+            .node
+            .list_chunks()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let stream = async_stream::stream! {
+            for chunk in chunks {
+                yield Ok(ChunkSummary {
+                    chunk_id: chunk.chunk_id,
+                    size_bytes: chunk.size_bytes as i64,
+                    modified_epoch_ms: chunk.modified_epoch_ms,
+                });
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream) as BoxStream<ChunkSummary>))
+    }
 }
 
 #[tonic::async_trait]
@@ -344,8 +369,8 @@ impl StorageNodeServer {
 mod tests {
     use super::*;
     use proto::storage::{
-        ChunkReference, DeleteChunkRequest, HealthCheckRequest, RetrieveChunkRequest,
-        StoreChunkRequest, chunk_service_client::ChunkServiceClient,
+        ChunkReference, DeleteChunkRequest, HealthCheckRequest, ListChunksRequest,
+        RetrieveChunkRequest, StoreChunkRequest, chunk_service_client::ChunkServiceClient,
         node_service_client::NodeServiceClient,
         retrieve_chunk_response::Payload as RetrievePayload,
         store_chunk_request::Payload as StorePayload,
@@ -519,6 +544,44 @@ mod tests {
             Err(status) => assert_eq!(status.code(), tonic::Code::NotFound),
             Ok(_) => panic!("expected NotFound for missing chunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn grpc_list_chunks_reports_stored_chunks() {
+        let node = start_node().await;
+        let mut client = connect(node.addr).await;
+
+        for (chunk_id, data) in [
+            ("list-chunk-a", b"aaa".to_vec()),
+            ("list-chunk-b", b"bbbbbb".to_vec()),
+        ] {
+            let sha = sha256_hex(&data);
+            client
+                .store_chunk(store_stream(chunk_id, &data, &sha))
+                .await
+                .expect("store");
+        }
+
+        let mut stream = client
+            .list_chunks(ListChunksRequest {})
+            .await
+            .expect("list chunks")
+            .into_inner();
+
+        let mut listed = Vec::new();
+        while let Some(chunk) = stream.message().await.expect("stream message") {
+            listed.push((chunk.chunk_id, chunk.size_bytes, chunk.modified_epoch_ms));
+        }
+        listed.sort();
+        assert_eq!(listed.len(), 2, "both stored chunks must be listed");
+        assert_eq!(listed[0].0, "list-chunk-a");
+        assert_eq!(listed[0].1, 3);
+        assert_eq!(listed[1].0, "list-chunk-b");
+        assert_eq!(listed[1].1, 6);
+        assert!(
+            listed.iter().all(|(_, _, mtime)| *mtime > 0),
+            "listings must carry a modification time"
+        );
     }
 
     #[tokio::test]
