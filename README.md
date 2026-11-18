@@ -78,7 +78,7 @@ Service binaries:
 
 | Binary | Default listen | Key environment variables |
 |---|---|---|
-| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC`, `GRPC_TLS_*` |
+| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC`, `RECOVERY_AGGREGATE_BYTES_PER_SEC`, `RECOVERY_PRIORITY_AGING_SECS`, `GRPC_TLS_*` |
 | `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR`, `GRPC_TLS_*` |
 | `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `COORDINATOR_ADDRS`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES`, `GRPC_TLS_*` |
 
@@ -130,8 +130,11 @@ the recorded target is unhealthy or refuses the write, the coordinator tries
 another healthy node that does not already hold the chunk. Completed tasks
 record the source and target that actually served the transfer. Tasks are
 claimed highest-priority first, where priority is the number of missing
-replicas. Set `RECOVERY_BANDWIDTH_BYTES_PER_SEC` to throttle each recovery
-transfer (unset or `0` means unlimited).
+replicas. `RECOVERY_PRIORITY_AGING_SECS` adds one priority point per interval a
+task waits, so low-priority work cannot starve. Set
+`RECOVERY_BANDWIDTH_BYTES_PER_SEC` to throttle each recovery transfer and
+`RECOVERY_AGGREGATE_BYTES_PER_SEC` to cap total recovery bandwidth across all
+concurrent transfers (unset or `0` means unlimited).
 
 ### Coordinator failover
 
@@ -140,8 +143,10 @@ serve the same gRPC API, but background work (lease monitoring,
 under-replication detection, recovery scheduling, and orphan GC) runs only on
 the coordinator holding a renewable database lease. The lease lasts 15 seconds
 and is renewed every 5 seconds; if the leader stops renewing, a standby takes
-over on its next attempt. `rustystore_coordinator_is_leader` exposes leadership
-state.
+over on its next attempt and increments the fencing epoch.
+`rustystore_coordinator_is_leader` exposes leadership state. Recovery claims
+record the leader epoch, and a leader that loses its lease cannot claim new work
+or publish replicas/task completions for work it no longer owns.
 
 The gateway accepts a comma-separated `COORDINATOR_ADDRS` list (falling back to
 `COORDINATOR_ADDR`) and retries transient gRPC failures on the next coordinator.

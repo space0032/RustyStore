@@ -44,6 +44,20 @@ expires unused keys after one hour. If the coordinator is unavailable the
 gateway falls back to its local bucket, so a coordinator outage degrades from
 cluster-wide to per-process limiting rather than failing all requests.
 
+## Recovery tuning and coordinator failover
+
+`RECOVERY_BANDWIDTH_BYTES_PER_SEC` limits each recovery transfer;
+`RECOVERY_AGGREGATE_BYTES_PER_SEC` caps total recovery traffic across concurrent
+transfers. Both default to unlimited (`0`). `RECOVERY_PRIORITY_AGING_SECS`
+(default `60`) adds one queue priority point per interval waited, preventing
+low-priority repairs from starving behind newer work.
+
+Only the coordinator holding the PostgreSQL lease runs recovery. Leadership
+takeover increments a fencing epoch; a stale leader cannot claim pending tasks,
+fail claimed tasks, or publish durable replicas after losing the lease. A
+recovery write that finishes after fencing leaves unreferenced chunk bytes for
+orphan GC rather than corrupting metadata.
+
 ## Simulating failure
 
 ```bash
