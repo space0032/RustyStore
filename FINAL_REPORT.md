@@ -99,7 +99,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-34.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-35.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -160,8 +160,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 32 | Graceful HTTP Shutdown, CI, Container Builds | Complete | Shared shutdown fan-out, `.github/workflows/ci.yml`, workspace-complete Dockerfiles |
 | 33 | Recovery Source Failover | Complete | Ordered healthy durable replicas, per-source SHA-256 verification, dead `replication` crate removed |
 | 34 | Recovery Target Failover & Shutdown-Aware Registration | Complete | Recorded target treated as a hint, other healthy non-holders tried, registration retries observe SIGTERM |
+| 35 | Full-Stack & S3 Integration Tests | Complete | Real coordinator + 3 nodes + gateway on PostgreSQL, node-failure download, re-replication, MinIO S3 tests |
 
-Phase documentation: `PHASE-1.md` through `PHASE-34.md`
+Phase documentation: `PHASE-1.md` through `PHASE-35.md`
 
 ---
 
@@ -216,7 +217,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Tests (78 unit + 6 integration + 6 PostgreSQL-backed = 90 total, all passing)
+### Tests (80 unit + 10 integration + 6 PostgreSQL-backed = 96 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -242,7 +243,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
 
-**coordinator** (24 tests):
+**coordinator** (25 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -267,8 +268,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 22. `target_candidates_prefers_recorded_target` — the task's target is tried first, then other healthy nodes
 23. `target_candidates_skips_unhealthy_target_and_occupied_nodes` — dead targets and nodes that already hold the chunk are skipped
 24. `target_candidates_empty_when_no_eligible_node` — recovery fails cleanly when every healthy node is a source or holder
+25. `node_endpoint_adds_scheme_only_when_missing` — recovery tolerates node addresses with or without an `http(s)` scheme
 
-**gateway** (20 tests):
+**gateway** (21 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
 2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
 3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
@@ -289,6 +291,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 18. `ready_is_503_when_coordinator_unreachable` — readiness fails closed
 19. `coordinator_not_found_maps_to_404` — gRPC NotFound becomes a 404
 20. `coordinator_unavailable_maps_to_502` — other gRPC failures become 502
+21. `adds_scheme_only_when_missing` — storage-node gRPC addresses are normalized before connecting
 
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
@@ -318,13 +321,23 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposable database; otherwise they return early. Provision one with `scripts/test-postgres.sh` / `scripts/test-postgres.ps1`.
 
-**integration** (6 tests):
+**integration** (10 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
 2. `test_placement_with_healthy_nodes` — distinct node selection
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
 4. `test_duplicate_chunk_dedup_by_hash` — content-addressed dedup
 5. `test_corrupted_chunk_detection` — integrity mismatch on verify
 6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404); the fake returns a 2 MB chunk size and rf 2 (proving the gateway honors coordinator settings), records replicas from the gateway's `node_ids` (failing if absent), and asserts every coordinator call, including those from the spawned download task, carries the HTTP `x-request-id`
+7. `full_stack_upload_download_list_delete` — real PostgreSQL + coordinator + 3 storage nodes + gateway: four chunks, 8 replica files, listing, byte-for-byte download, delete, 404
+8. `download_survives_a_storage_node_failure` — stops the first replica of a chunk and downloads from the other
+9. `concurrent_uploads_are_all_committed` — four parallel HTTP uploads commit and appear in one listing page
+10. `recovery_replaces_a_failed_replica` — expires a replica node's lease, marks its replica non-durable, and waits for the detector/scheduler to copy the chunk to the spare node
+
+**storage-engine S3 (2 tests, require `--features s3` and `TEST_S3_ENDPOINT`)**:
+1. `s3_store_roundtrip_and_integrity` — store, exists, retrieve, verify, list, delete, idempotent re-delete
+2. `s3_store_rejects_corrupted_uploads` — a mismatched SHA-256 is rejected before the object is written
+
+The full-stack tests share the PostgreSQL gate and run against a real coordinator and nodes; CI also provides MinIO for the S3 tests.
 
 ### Benchmarks (Criterion)
 
@@ -400,6 +413,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 6. **TLS/mTLS not implemented** — recommended at reverse proxy layer
 7. **PostgreSQL integration tests skip without a database** — locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
 8. **Recovery failover is sequential** — candidate sources and targets are tried one at a time; a successful failover does not rewrite the task's recorded source or target
+9. **Storage nodes advertise their bind address by default** — Compose deployments should set a reachable advertised address for coordinator/gateway connections
 
 ---
 
@@ -429,7 +443,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Orphan-chunk GC** — coordinator lists chunks on healthy nodes, subtracts metadata references, and reclaims bytes older than a grace period; abandoned uploads are reaped on a TTL
 - **PostgreSQL-backed integration tests** — real SQL paths for replica commit, FK cascades, task dedup/claiming, GC reaping, and file pagination, provisioned through a disposable Docker database
 - **Paginated file listing** — `GET /api/v1/files` with opaque keyset cursors (timestamp + id), stable newest-first ordering, and a committed-only filter
-- **CI pipeline** — GitHub Actions checks formatting and clippy with warnings denied, runs all workspace tests against a PostgreSQL service container, and builds every service image
+- **CI pipeline** — GitHub Actions checks formatting and clippy with warnings denied, runs all workspace tests against PostgreSQL and MinIO service containers, and builds every service image
 - **Working container builds** — Dockerfiles copy the complete workspace (including `benchmarks/` and `tests/` members) and a `.dockerignore` keeps contexts small; all three images build locally and in CI
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
@@ -440,7 +454,9 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Recovery failover** — replication tries the recorded source first, then any other healthy durable replica, verifying SHA-256 per source before writing; the recorded target is likewise a hint, with other healthy non-holders tried when it is unhealthy or refuses the write
 - **Shutdown-aware registration** — a storage node waiting for the coordinator stops retrying on SIGINT/SIGTERM and drains its HTTP probes instead of blocking shutdown
 - **Dead-code removal** — the unused `crates/replication` placeholder is gone; the coordinator owns the scheduler (workspace now 11 crates)
-- **90 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
+- **Full-stack integration tests** — real coordinator, three storage nodes, PostgreSQL, and the gateway router exercise multi-chunk upload/download/delete, replica failover during download, concurrent uploads, and automatic re-replication after lease expiry
+- **S3/MinIO integration tests** — feature-gated round-trip and integrity tests run in CI against a MinIO service container
+- **96 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
@@ -486,4 +502,4 @@ MIT
 
 ---
 
-*Generated as part of the RustyStore distributed storage system project. All phases (1–33) implemented and committed.*
+*Generated as part of the RustyStore distributed storage system project. All phases (1-35) implemented and committed.*

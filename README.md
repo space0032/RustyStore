@@ -152,11 +152,20 @@ cargo test --workspace
 
 The metadata crate also has PostgreSQL-backed integration tests for replica
 commit, FK cascades, replication-task claiming, GC reaping, and file pagination.
-They are skipped unless `TEST_DATABASE_URL` (or `DATABASE_URL`) is set. With
+The integration crate starts a real coordinator and three real storage nodes
+against that database to cover multi-chunk upload/download/delete, download
+during a node failure, concurrent uploads, and automatic re-replication. These
+tests are skipped unless `TEST_DATABASE_URL` (or `DATABASE_URL`) is set. With
 Docker installed, provision a disposable database and run them with:
 
 ```bash
 scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
+```
+
+S3/MinIO tests are feature-gated and run when `TEST_S3_ENDPOINT` is set:
+
+```bash
+cargo test -p storage-engine --features s3 --test s3_integration
 ```
 
 ## Continuous Integration
@@ -165,8 +174,8 @@ scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` with a `postgres:15-alpine` service container and
-  `TEST_DATABASE_URL`, so the PostgreSQL-backed tests always run
+- `cargo test --workspace` with `postgres:15-alpine` and `minio/minio` service
+  containers, so the PostgreSQL-backed and S3-backed tests always run
 - Docker image builds for the coordinator, storage node, and gateway
 
 Build an image locally with:
