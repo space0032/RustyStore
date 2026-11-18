@@ -212,15 +212,18 @@ The metadata crate also has PostgreSQL-backed integration tests for replica
 commit, FK cascades, replication-task claiming, GC reaping, and file pagination.
 The integration crate starts a real coordinator and three real storage nodes
 against that database to cover multi-chunk upload/download/delete, download
-during a node failure, concurrent uploads, automatic re-replication, and gateway
-failover to a standby coordinator. The metadata tests also cover coordinator
-leadership leases. These tests are skipped unless `TEST_DATABASE_URL` (or
-`DATABASE_URL`) is set. With Docker installed, provision a disposable database
-and run them with:
+during a node failure, concurrent uploads, automatic re-replication, gateway
+failover to a standby coordinator, and repeated upload/download/delete soak
+cycles. The metadata tests also cover coordinator leadership leases. These tests
+are skipped unless `TEST_DATABASE_URL` (or `DATABASE_URL`) is set. With Docker
+installed, provision a disposable database and run them with:
 
 ```bash
 scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
 ```
+
+Set `RUSTYSTORE_SOAK_ITERATIONS` to change the automated soak length (default 6,
+maximum 50).
 
 S3/MinIO tests are feature-gated and run when `TEST_S3_ENDPOINT` is set:
 
@@ -232,6 +235,22 @@ The S3 backend retries transient failures with adaptive backoff (five
 attempts), bounds each attempt to 60 seconds, and switches to 8 MiB multipart
 parts for objects above 16 MiB.
 
+## Release validation
+
+Run the full local gate (format, compile, clippy, tests, and S3 unit tests):
+
+```bash
+scripts/release-check.sh        # or scripts/release-check.ps1 on Windows
+```
+
+Set `RELEASE_CHECK_DOCKER=1` to build all three service images. Against a
+running stack, `scripts/soak.sh` uploads, downloads, checksums, and deletes
+repeated payloads:
+
+```bash
+SOAK_ITERATIONS=50 SOAK_SIZE_KB=512 scripts/soak.sh
+```
+
 ## Continuous Integration
 
 `.github/workflows/ci.yml` runs on every push and pull request:
@@ -239,7 +258,9 @@ parts for objects above 16 MiB.
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace` with `postgres:15-alpine` and `minio/minio` service
-  containers, so the PostgreSQL-backed and S3-backed tests always run
+  containers, so the PostgreSQL-backed and full-stack soak tests always run
+- `cargo test -p storage-engine --features s3`, covering S3 unit and MinIO
+  integration tests
 - Docker image builds for the coordinator, storage node, and gateway
 - On `v*` tags, images are published to GHCR as
   `ghcr.io/<owner>/<repo>/{coordinator,storage-node,gateway}` with the tag and

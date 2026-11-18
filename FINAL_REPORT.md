@@ -89,7 +89,10 @@ distributed-storage/
 │   ├── partition-node.sh   # Fault injection: simulate network partition
 │   ├── test-postgres.sh    # Provision disposable Postgres + run metadata integration tests
 │   ├── test-postgres.ps1   # Same, for Windows
-│   └── e2e-smoke.sh        # End-to-end smoke test script
+│   ├── e2e-smoke.sh        # End-to-end smoke test script
+│   ├── soak.sh             # HTTP upload/download/delete soak loop
+│   ├── release-check.sh    # Local release gate (Unix)
+│   └── release-check.ps1   # Local release gate (Windows)
 ├── tests/
 │   └── src/lib.rs          # Integration tests (5 tests)
 ├── benchmarks/
@@ -99,7 +102,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-39.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-45.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -165,8 +168,14 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 37 | Coordinator HA-Lite, Gateway Failover & Image Publishing | Complete | PostgreSQL leadership lease, standby coordinators, gateway retry/failover, Compose healthchecks, GHCR publishing |
 | 38 | Legacy RPC & Workspace Cleanup | Complete | Removed AssignReplica/NodeHeartbeat, storage-node service stubs, dead recovery cycle; workspace metadata and Compose cleanup |
 | 39 | Dead RPC, Task Recovery & Docs Cleanup | Complete | Removed `ReplicateChunk` and dead `StorageNode` address API; per-task retry limit; stale recovery task cleanup; corrected operations docs/env/config |
+| 40 | gRPC TLS/mTLS | Complete | `common::tls`, server/client env configuration, `scripts/gen-certs.sh`, `docker-compose.tls.yml` |
+| 41 | Shared Rate Limiting | Complete | `CheckRateLimit` RPC, PostgreSQL token buckets, gateway shared limiter with local fallback, `Retry-After` |
+| 42 | Leader Fencing & Recovery QoS | Complete | Leadership epochs, fenced task claim/complete, takeover cleanup, aggregate throttle, priority aging |
+| 43 | Coordinator Registry & Gateway Discovery | Complete | `coordinator_registry` leases, `ListCoordinators`, gateway refresh loop, `COORDINATOR_ADVERTISE_ADDR` |
+| 44 | S3 Multipart & Retry Hardening | Complete | Adaptive retries/timeouts, 8 MiB multipart parts above 16 MiB, abort-on-failure, error classification |
+| 45 | Fault Injection, Soak & Release Validation | Complete | Full-stack soak cycles, `scripts/soak.sh`, cross-platform `release-check` scripts, CI S3 unit tests |
 
-Phase documentation: `PHASE-1.md` through `PHASE-39.md`
+Phase documentation: `PHASE-1.md` through `PHASE-45.md`
 
 ---
 
@@ -222,9 +231,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Tests (86 unit + 11 integration + 9 PostgreSQL-backed = 106 total, all passing)
+### Tests (113 workspace tests, plus 5 feature-gated S3 tests)
 
-**common** (11 tests):
+**common** (13 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
 2. `parse_value_rejects_garbage_with_key_context` — typed error names the key/value
 3. `parse_addr_value_accepts_valid_address` — address parsing
@@ -236,8 +245,10 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 9. `nested_scope_overrides_then_restores` — nested scopes restore the outer id
 10. `scope_opt_none_leaves_unset` — `None` does not create a scope
 11. `scope_opt_some_sets_id` — `Some` scopes the id
+12. `absent_variables_mean_plaintext` - missing TLS env leaves gRPC plaintext
+13. `incomplete_server_identity_is_rejected` - a cert without a key fails fast
 
-**storage-engine** (9 tests):
+**storage-engine** (9 default tests + 2 S3 unit tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
 2. `test_retrieve_nonexistent_chunk` — NotFound error
 3. `test_integrity_mismatch_on_store` — reject mismatched SHA-256 on write
@@ -247,6 +258,8 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 7. `test_get_capacity` — disk capacity query
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
+10. `part_ranges_cover_payload_without_gaps` - multipart ranges are contiguous and end on the payload boundary
+11. `part_ranges_handle_empty_and_short_payloads` - empty and sub-part payloads are handled
 
 **coordinator** (28 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
@@ -322,7 +335,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 12. `registration_stops_when_shutdown_already_requested` — a pre-set shutdown flag skips coordinator registration
 13. `registration_stops_when_shutdown_arrives_while_retrying` — a signal interrupts the registration retry loop
 
-**metadata (8 tests, require `TEST_DATABASE_URL`)**:
+**metadata (13 tests, require `TEST_DATABASE_URL`)**:
 1. `complete_upload_records_chunks_and_durable_replicas` — chunk + durable replica rows committed atomically, manifest readable, no under-replication
 2. `deleting_file_cascades_chunks_replicas_sessions_and_tasks` — FK cascades remove chunks, replicas, upload sessions, and replication tasks
 3. `replication_task_dedup_and_stale_in_progress` — active-task dedup, abandoned `in_progress` expiry, completed tasks inactive
@@ -332,10 +345,14 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 7. `replication_task_priority_order_and_actual_nodes` - higher-priority tasks are claimed first and completed rows record the actual source/target
 8. `leadership_lease_allows_one_coordinator_and_expires` - one leader renews, a standby is blocked, expiry allows takeover, and the old leader is rejected
 9. `replication_task_retry_limit_and_stale_cleanup` - retries stop at the task's `max_attempts`, and abandoned `in_progress` tasks are failed for rescheduling
+10. `new_leader_fails_tasks_claimed_by_older_epochs` - takeover fails stale in-progress tasks and the new leader can reclaim them
+11. `replication_task_priority_ages_to_avoid_starvation` - waiting tasks gain priority until claimed
+12. `shared_rate_limit_buckets_enforce_burst_per_key` - PostgreSQL buckets are shared across gateway processes
+13. `coordinator_registry_reports_only_live_rows` - registration, renewal, live filtering, and stale-row cleanup
 
 These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposable database; otherwise they return early. Provision one with `scripts/test-postgres.sh` / `scripts/test-postgres.ps1`.
 
-**integration** (11 tests):
+**integration** (12 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
 2. `test_placement_with_healthy_nodes` — distinct node selection
 3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
@@ -347,12 +364,14 @@ These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposab
 9. `concurrent_uploads_are_all_committed` — four parallel HTTP uploads commit and appear in one listing page
 10. `recovery_replaces_a_failed_replica` — expires a replica node's lease, marks its replica non-durable, and verifies the detector/scheduler copies the chunk to the spare node and records the actual source/target
 11. `gateway_fails_over_between_coordinators` - the gateway keeps serving after its active coordinator stops by retrying the standby coordinator
+12. `soak_repeated_upload_download_delete_cycles` - repeated multi-chunk upload/download/delete cycles verify bytes, replica counts, 404s, and no leaked chunk files
 
-**storage-engine S3 (2 tests, require `--features s3` and `TEST_S3_ENDPOINT`)**:
+**storage-engine S3 (3 integration tests, require `--features s3` and `TEST_S3_ENDPOINT`)**:
 1. `s3_store_roundtrip_and_integrity` — store, exists, retrieve, verify, list, delete, idempotent re-delete
 2. `s3_store_rejects_corrupted_uploads` — a mismatched SHA-256 is rejected before the object is written
+3. `s3_store_multipart_roundtrip` - a 17 MiB object uploads through three multipart parts and downloads byte-for-byte
 
-The full-stack tests share the PostgreSQL gate and run against a real coordinator and nodes; CI also provides MinIO for the S3 tests.
+The full-stack tests share the PostgreSQL gate and run against a real coordinator and nodes; the soak test length is controlled by `RUSTYSTORE_SOAK_ITERATIONS`. CI also provides MinIO and runs both the S3 unit tests and the integration target.
 
 ### Benchmarks (Criterion)
 
@@ -427,16 +446,18 @@ coordinator service against the same PostgreSQL database and set
 
 ## Known Limitations
 
-1. **HA-lite, not consensus** - coordinators share PostgreSQL and a lease elects one background worker; there is no quorum, fencing token, or automatic promotion of a different process. At least one coordinator must be reachable for new writes.
-2. **S3 backend feature-gated** - `cargo build --features storage-engine/s3` required
-3. **Recovery bandwidth throttling is opt-in and per-transfer** - `RECOVERY_BANDWIDTH_BYTES_PER_SEC` limits each source/target transfer, not aggregate recovery bandwidth
-4. **Recovery priority is a single integer** - derived from the number of missing replicas, with no aging or per-file priority
-5. **Rate limiting is per-process** - the token bucket lives in each gateway instance and is not shared across replicas
-6. **TLS/mTLS not implemented** - recommended at reverse proxy layer
-7. **PostgreSQL integration tests skip without a database** - locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
-8. **Recovery target failover is sequential** - sources race in parallel, but targets are tried one at a time to avoid duplicate replicas; completed tasks record the nodes that actually served the transfer
-9. **In-flight recovery after lease loss** - a former leader may finish transfers started before its lease expired; replication is idempotent and task state is authoritative, but brief duplicate transfers are possible
-10. **Storage nodes default to their bind address** - set `ADVERTISED_ADDR` when `NODE_ADDR` is not reachable by peers (Docker Compose sets it)
+1. **HA-lite, not consensus** - coordinators share PostgreSQL and a renewable lease elects one background worker. Leadership epochs fence stale workers, but there is no quorum; at least one coordinator must be reachable for new writes, and promotion happens after lease expiry rather than through an instant election.
+2. **S3 backend feature-gated** - `cargo build --features storage-engine/s3` required. Multipart uploads start above 16 MiB; the filesystem backend remains the default.
+3. **Recovery bandwidth throttling is opt-in** - `RECOVERY_BANDWIDTH_BYTES_PER_SEC` bounds each transfer and `RECOVERY_AGGREGATE_BYTES_PER_SEC` bounds total recovery traffic; both default to unlimited.
+4. **Recovery priority is a single integer** - derived from the number of missing replicas, with time-based aging (`RECOVERY_PRIORITY_AGING_SECS`) but no per-file priority.
+5. **Shared rate limiting falls back locally** - gateway replicas share PostgreSQL buckets through the coordinator; if the coordinator is unreachable, each gateway enforces its own bucket until connectivity returns.
+6. **Gateway HTTP is plaintext** - gRPC supports TLS/mTLS, but client-facing HTTP should terminate TLS at a reverse proxy.
+7. **PostgreSQL integration tests skip without a database** - locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there.
+8. **Recovery target failover is sequential** - sources race in parallel, but targets are tried one at a time to avoid duplicate replicas; completed tasks record the nodes that actually served the transfer.
+9. **In-flight recovery after lease loss** - a former leader may finish transfers started before its lease expired. Fenced completion prevents metadata corruption, but unreferenced chunk bytes may remain for orphan GC.
+10. **Storage nodes default to their bind address** - set `ADVERTISED_ADDR` when `NODE_ADDR` is not reachable by peers (Docker Compose sets it).
+11. **Coordinator discovery needs a reachable advertised address** - set `COORDINATOR_ADVERTISE_ADDR` when the bind address is `0.0.0.0` or differs from the peer-facing address.
+12. **Local soak coverage is short by default** - the automated full-stack soak runs six iterations (maximum 50); use `scripts/soak.sh` for longer deployment-level runs.
 
 ---
 
@@ -492,7 +513,14 @@ coordinator service against the same PostgreSQL database and set
 - **Dead RPC/API cleanup** - removed the unimplemented `ReplicateChunk` RPC and the unused storage-node `register`/address API; storage nodes expose only the operations they serve
 - **Recovery task correctness** - retries now honor each task's `max_attempts`, and abandoned `in_progress` tasks are failed by the leader so fresh work can be scheduled
 - **Operations cleanup** - corrected health/metrics ports and migration guidance, and removed unused `PROMETHEUS_ADDR`/lease env vars, the dead `common::Config` struct, and `envy`
-- **106 passing tests** across common config, storage engine, coordinator, gateway, storage node
+- **gRPC TLS/mTLS** - shared server/client helpers, certificate validation at startup, generated test certs, and a Compose TLS overlay
+- **Shared rate limiting** - PostgreSQL token buckets behind a coordinator RPC, with local fallback and `Retry-After` responses
+- **Leader fencing** - leadership epochs prevent stale coordinators from claiming, failing, or completing recovery tasks after lease loss
+- **Recovery QoS** - aggregate bandwidth limits and priority aging keep recovery from starving new work or saturating the cluster
+- **Coordinator discovery** - live registry leases plus `ListCoordinators` let gateways expand their endpoint pool from one bootstrap address
+- **S3 hardening** - adaptive retries, bounded timeouts, multipart uploads, abort-on-failure, and outage-aware error classification
+- **Release validation** - automated full-stack soak cycles, an HTTP soak script, and cross-platform release-check scripts aligned with CI
+- **113 workspace tests plus 5 feature-gated S3 tests** across common config/TLS, storage engine, coordinator, gateway, storage node
   (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
@@ -519,6 +547,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Check formatting
 cargo fmt --all -- --check
 
+# Run the full local release gate
+scripts/release-check.sh        # or scripts/release-check.ps1 on Windows
+
+# Soak a running stack over HTTP
+SOAK_ITERATIONS=50 SOAK_SIZE_KB=512 scripts/soak.sh
+
 # Run benchmarks
 cargo bench
 
@@ -539,4 +573,4 @@ MIT
 
 ---
 
-*Generated as part of the RustyStore distributed storage system project. All phases (1-35) implemented and committed.*
+*Generated as part of the RustyStore distributed storage system project. All phases (1-45) implemented and committed.*

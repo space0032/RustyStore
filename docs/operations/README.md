@@ -75,6 +75,17 @@ hour.
 ./scripts/partition-node.sh storage-node-3
 ```
 
+## Soak and release validation
+
+`scripts/soak.sh` drives the HTTP API against a running stack and verifies
+checksums across repeated upload/download/delete cycles. `GATEWAY_URL`,
+`SOAK_ITERATIONS` (default 20), and `SOAK_SIZE_KB` (default 256) control it.
+
+`scripts/release-check.sh` (or `.ps1`) runs formatting, compilation, clippy,
+workspace tests, and S3 unit tests. PostgreSQL/full-stack tests join when
+`TEST_DATABASE_URL` is set; S3 integration tests join when `TEST_S3_ENDPOINT` is
+set. Set `RELEASE_CHECK_DOCKER=1` to build all service images as well.
+
 ## Metrics
 
 Prometheus scrapes the HTTP port of each service:
