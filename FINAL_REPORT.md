@@ -86,6 +86,8 @@ distributed-storage/
 ├── scripts/
 │   ├── crash-node.sh       # Fault injection: simulate node crash
 │   ├── partition-node.sh   # Fault injection: simulate network partition
+│   ├── test-postgres.sh    # Provision disposable Postgres + run metadata integration tests
+│   ├── test-postgres.ps1   # Same, for Windows
 │   └── e2e-smoke.sh        # End-to-end smoke test script
 ├── tests/
 │   └── src/lib.rs          # Integration tests (5 tests)
@@ -96,7 +98,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-29.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-30.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -153,8 +155,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 27 | Durable Replica Recording on Commit | Complete | `ChunkManifest.node_ids`, atomic chunk+replica insert, empty replica list rejected |
 | 28 | Replication Task Deduplication | Complete | One live task per chunk; stale `in_progress` tasks expire after 5 minutes |
 | 29 | Orphan-Chunk GC & Stale Upload Reaper | Complete | `ListChunks` RPC, grace-period collection, TTL reaping of abandoned uploads |
+| 30 | PostgreSQL-Backed Integration Tests | Complete | `metadata/tests/postgres_integration.rs`, `scripts/test-postgres.{sh,ps1}` |
 
-Phase documentation: `PHASE-1.md` through `PHASE-29.md`
+Phase documentation: `PHASE-1.md` through `PHASE-30.md`
 
 ---
 
@@ -208,7 +211,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (66 unit + 6 integration = 72 total, all passing)
+### Tests (66 unit + 6 integration + 5 PostgreSQL-backed = 77 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -288,6 +291,15 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 9. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
 10. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
 
+**metadata (5 tests, require `TEST_DATABASE_URL`)**:
+1. `complete_upload_records_chunks_and_durable_replicas` — chunk + durable replica rows committed atomically, manifest readable, no under-replication
+2. `deleting_file_cascades_chunks_replicas_sessions_and_tasks` — FK cascades remove chunks, replicas, upload sessions, and replication tasks
+3. `replication_task_dedup_and_stale_in_progress` — active-task dedup, abandoned `in_progress` expiry, completed tasks inactive
+4. `claim_replication_task_marks_in_progress_once` — `FOR UPDATE SKIP LOCKED` hands a task out exactly once
+5. `existing_chunk_ids_and_stale_upload_reaping` — reference lookup + TTL reaping removes abandoned uploads but keeps committed files
+
+These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposable database; otherwise they return early. Provision one with `scripts/test-postgres.sh` / `scripts/test-postgres.ps1`.
+
 **integration** (6 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
 2. `test_placement_with_healthy_nodes` — distinct node selection
@@ -311,6 +323,7 @@ Run with: `cargo bench`
 - `scripts/crash-node.sh` — stop a storage node, wait for lease expiry, restart, verify recovery
 - `scripts/partition-node.sh` — isolate a node from network, wait for lease expiry, reconnect
 - `scripts/e2e-smoke.sh` — start stack, run migrations, build services
+- `scripts/test-postgres.sh` / `.ps1` — provision a disposable PostgreSQL, run metadata integration tests, remove the container
 
 ---
 
@@ -356,7 +369,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 5. **No priority queue** — all recovery tasks equal priority (FIFO)
 6. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
-8. **PostgreSQL-backed integration tests are not automated yet** — SQL paths are covered by in-process fakes and manual runs
+8. **PostgreSQL integration tests are not part of the default `cargo test` run** — they need `TEST_DATABASE_URL` and a disposable database; `scripts/test-postgres.{sh,ps1}` provisions one with Docker
 
 ---
 
@@ -384,13 +397,14 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Replica metadata committed with files** — uploads record durable replicas in the same transaction as the chunk and file rows, so manifests are downloadable and deletion can locate chunk bytes
 - **Replication task deduplication** — one live task per chunk prevents detector-tick task storms, with stale in-progress tasks expiring so recovery cannot wedge
 - **Orphan-chunk GC** — coordinator lists chunks on healthy nodes, subtracts metadata references, and reclaims bytes older than a grace period; abandoned uploads are reaped on a TTL
+- **PostgreSQL-backed integration tests** — real SQL paths for replica commit, FK cascades, task dedup/claiming, and GC reaping, provisioned through a disposable Docker database
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
 - **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
 - **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
 - **Coordinator-authoritative chunking** — the coordinator supplies chunk size and replication factor; the gateway uses them, so manifests match actual placement
-- **60 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, and integration
+- **77 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
@@ -406,6 +420,9 @@ cargo build --workspace --features storage-engine/s3
 
 # Run all tests
 cargo test --workspace
+
+# Run the PostgreSQL-backed metadata tests (Docker required)
+scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
 
 # Run clippy (zero warnings)
 cargo clippy --workspace -- -D warnings

@@ -137,6 +137,15 @@ cargo fmt --all -- --check
 cargo test --workspace
 ```
 
+The metadata crate also has PostgreSQL-backed integration tests for replica
+commit, FK cascades, replication-task claiming, and GC reaping. They are
+skipped unless `TEST_DATABASE_URL` (or `DATABASE_URL`) is set. With Docker
+installed, provision a disposable database and run them with:
+
+```bash
+scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
+```
+
 ## Documentation
 
 - `docs/architecture/` — Mermaid diagrams and data flows
