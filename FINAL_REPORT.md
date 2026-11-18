@@ -67,7 +67,9 @@ distributed-storage/
 ├── Cargo.toml              # Workspace root (12 members)
 ├── rust-toolchain.toml     # Stable, 2024 edition
 ├── .env.example            # Environment configuration template
+├── .dockerignore           # Keeps images small and workspace-complete
 ├── docker-compose.yml      # Postgres, MinIO, Coordinator, 3 Storage Nodes, Gateway
+├── .github/workflows/ci.yml # fmt, clippy, tests (incl. PostgreSQL), image builds
 ├── README.md
 ├── crates/
 │   ├── proto/              # Protocol Buffer definitions + generated tonic code
@@ -98,7 +100,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-31.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-32.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -157,8 +159,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 29 | Orphan-Chunk GC & Stale Upload Reaper | Complete | `ListChunks` RPC, grace-period collection, TTL reaping of abandoned uploads |
 | 30 | PostgreSQL-Backed Integration Tests | Complete | `metadata/tests/postgres_integration.rs`, `scripts/test-postgres.{sh,ps1}` |
 | 31 | Paginated File Listing | Complete | `ListFiles` RPC, keyset cursor, `GET /api/v1/files` |
+| 32 | Graceful HTTP Shutdown, CI, Container Builds | Complete | Shared shutdown fan-out, `.github/workflows/ci.yml`, workspace-complete Dockerfiles |
 
-Phase documentation: `PHASE-1.md` through `PHASE-31.md`
+Phase documentation: `PHASE-1.md` through `PHASE-32.md`
 
 ---
 
@@ -213,7 +216,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Tests (68 unit + 6 integration + 6 PostgreSQL-backed = 80 total, all passing)
+### Tests (70 unit + 6 integration + 6 PostgreSQL-backed = 82 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -239,7 +242,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
 
-**coordinator** (17 tests):
+**coordinator** (18 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -257,6 +260,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 15. `keeps_chunks_at_exactly_the_cutoff` — grace period is inclusive
 16. `file_cursor_roundtrips` — list cursor preserves the exact timestamp and id
 17. `file_cursor_rejects_garbage` — malformed cursors return `InvalidArgument`
+18. `graceful_shutdown_stops_http_server` — the HTTP probe server drains and releases its port on shutdown
 
 **gateway** (20 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
@@ -283,7 +287,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
 
-**storage-node** (10 tests: 5 gRPC + 5 HTTP):
+**storage-node** (11 tests: 5 gRPC + 6 HTTP):
 1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`, asserts storage counters advance
 2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
 3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
@@ -294,6 +298,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `ready_reports_503_when_storage_down` — `/ready` 503 when the volume probe fails
 9. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
 10. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
+11. `graceful_shutdown_stops_http_server` — the HTTP probe server drains and releases its port on shutdown
 
 **metadata (6 tests, require `TEST_DATABASE_URL`)**:
 1. `complete_upload_records_chunks_and_durable_replicas` — chunk + durable replica rows committed atomically, manifest readable, no under-replication
@@ -345,6 +350,18 @@ docker compose up -d
 The coordinator applies the schema automatically on startup (embedded,
 idempotent DDL), so no separate migration step is required.
 
+Each service also has a standalone Dockerfile:
+
+```bash
+docker build -f crates/coordinator/Dockerfile -t rustystore-coordinator .
+docker build -f crates/storage-node/Dockerfile -t rustystore-storage-node .
+docker build -f crates/gateway/Dockerfile -t rustystore-gateway .
+```
+
+The build copies the complete Cargo workspace, and `.dockerignore` excludes
+`target`, `.git`, `data`, and the host toolchain file. GitHub Actions builds all
+three images on every push and pull request.
+
 ### Local run (service binaries)
 
 ```bash
@@ -374,7 +391,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 5. **No priority queue** — all recovery tasks equal priority (FIFO)
 6. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
-8. **PostgreSQL integration tests are not part of the default `cargo test` run** — they need `TEST_DATABASE_URL` and a disposable database; `scripts/test-postgres.{sh,ps1}` provisions one with Docker
+8. **PostgreSQL integration tests skip without a database** — locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
 
 ---
 
@@ -392,7 +409,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **`FOR UPDATE SKIP LOCKED`** — atomic replication task claiming
 - **Pluggable storage tier** — filesystem (default) + S3/MinIO (feature-gated)
 - **Authentication middleware** — Bearer token validation
-- **Graceful shutdown** — all services handle SIGINT and SIGTERM (Docker/Kubernetes) and drain in-flight work
+- **Graceful shutdown** — all services handle SIGINT and SIGTERM (Docker/Kubernetes) and drain in-flight work; the coordinator and storage node fan one signal out to both their gRPC and HTTP probe servers
 - **Observability** — tracing (JSON), Prometheus metrics, request tracing
 - **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges, storage-node chunk/byte store and delete counters
 - **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
@@ -404,13 +421,15 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Orphan-chunk GC** — coordinator lists chunks on healthy nodes, subtracts metadata references, and reclaims bytes older than a grace period; abandoned uploads are reaped on a TTL
 - **PostgreSQL-backed integration tests** — real SQL paths for replica commit, FK cascades, task dedup/claiming, GC reaping, and file pagination, provisioned through a disposable Docker database
 - **Paginated file listing** — `GET /api/v1/files` with opaque keyset cursors (timestamp + id), stable newest-first ordering, and a committed-only filter
+- **CI pipeline** — GitHub Actions checks formatting and clippy with warnings denied, runs all workspace tests against a PostgreSQL service container, and builds every service image
+- **Working container builds** — Dockerfiles copy the complete workspace (including `benchmarks/` and `tests/` members) and a `.dockerignore` keeps contexts small; all three images build locally and in CI
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
 - **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
 - **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
 - **Coordinator-authoritative chunking** — the coordinator supplies chunk size and replication factor; the gateway uses them, so manifests match actual placement
-- **80 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
+- **82 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
@@ -431,13 +450,18 @@ cargo test --workspace
 scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
 
 # Run clippy (zero warnings)
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Check formatting
 cargo fmt --all -- --check
 
 # Run benchmarks
 cargo bench
+
+# Build container images
+docker build -f crates/coordinator/Dockerfile -t rustystore-coordinator .
+docker build -f crates/storage-node/Dockerfile -t rustystore-storage-node .
+docker build -f crates/gateway/Dockerfile -t rustystore-gateway .
 
 # Start infrastructure with Docker Compose
 docker compose up -d
@@ -451,4 +475,4 @@ MIT
 
 ---
 
-*Generated as part of the RustyStore distributed storage system project. All phases (1–10) implemented and committed.*
+*Generated as part of the RustyStore distributed storage system project. All phases (1–32) implemented and committed.*

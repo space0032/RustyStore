@@ -91,7 +91,9 @@ creates an upload and reports the same values, so manifests always match actual
 placement.
 
 All services handle `SIGINT` (Ctrl+C) and `SIGTERM` (Docker/Kubernetes) and
-shut down gracefully, draining in-flight work before exiting.
+shut down gracefully, draining in-flight work before exiting. The coordinator
+and storage node fan one signal out to both their gRPC API and their HTTP
+probe/metrics server.
 
 `DELETE /api/v1/files/{id}` removes the file and chunk metadata first, then
 deletes the chunk bytes from the storage nodes that held them. Byte deletion is
@@ -142,12 +144,30 @@ cargo test --workspace
 ```
 
 The metadata crate also has PostgreSQL-backed integration tests for replica
-commit, FK cascades, replication-task claiming, and GC reaping. They are
-skipped unless `TEST_DATABASE_URL` (or `DATABASE_URL`) is set. With Docker
-installed, provision a disposable database and run them with:
+commit, FK cascades, replication-task claiming, GC reaping, and file pagination.
+They are skipped unless `TEST_DATABASE_URL` (or `DATABASE_URL`) is set. With
+Docker installed, provision a disposable database and run them with:
 
 ```bash
 scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
+```
+
+## Continuous Integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace` with a `postgres:15-alpine` service container and
+  `TEST_DATABASE_URL`, so the PostgreSQL-backed tests always run
+- Docker image builds for the coordinator, storage node, and gateway
+
+Build an image locally with:
+
+```bash
+docker build -f crates/coordinator/Dockerfile -t rustystore-coordinator .
+docker build -f crates/storage-node/Dockerfile -t rustystore-storage-node .
+docker build -f crates/gateway/Dockerfile -t rustystore-gateway .
 ```
 
 ## Documentation
