@@ -67,14 +67,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wait_for_shutdown(shutdown_rx.clone()),
     ));
 
-    // Register with the coordinator, retrying until it is reachable.
-    let node_id = register_with_retry(
+    // Register with the coordinator, retrying until it is reachable or the
+    // process is asked to shut down.
+    let Some(node_id) = register_with_retry(
         &coordinator_addr,
         &advertised_addr,
         &node_addr,
         capacity_bytes,
+        shutdown_rx.clone(),
     )
-    .await;
+    .await
+    else {
+        tracing::info!("shutdown requested before registration; draining storage node");
+        let _ = signal_tx.send(true);
+        match http_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!("storage node HTTP server failed: {e}"),
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => tracing::error!("storage node HTTP task failed: {e}"),
+        }
+        signal_task.abort();
+        return Ok(());
+    };
     node.set_node_id(node_id);
     tracing::info!("registered with coordinator as node_id={node_id}");
 
@@ -117,14 +131,26 @@ async fn register_with_retry(
     advertised_addr: &str,
     grpc_addr: &str,
     capacity_bytes: i64,
-) -> Uuid {
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Option<Uuid> {
+    if *shutdown.borrow() {
+        return None;
+    }
     loop {
-        match register_once(coordinator_addr, advertised_addr, grpc_addr, capacity_bytes).await {
-            Ok(node_id) => return node_id,
-            Err(e) => {
-                tracing::warn!("registration failed: {e}; retrying in 3s");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::select! {
+            result = register_once(coordinator_addr, advertised_addr, grpc_addr, capacity_bytes) => {
+                match result {
+                    Ok(node_id) => return Some(node_id),
+                    Err(e) => {
+                        tracing::warn!("registration failed: {e}; retrying in 3s");
+                        tokio::select! {
+                            _ = wait_for_shutdown(shutdown.clone()) => return None,
+                            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                        }
+                    }
+                }
             }
+            _ = wait_for_shutdown(shutdown.clone()) => return None,
         }
     }
 }
@@ -190,4 +216,31 @@ async fn heartbeat_stream(
         tracing::debug!("heartbeat ack: healthy={}", resp.healthy);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::register_with_retry;
+
+    #[tokio::test]
+    async fn registration_stops_when_shutdown_already_requested() {
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+
+        let result = register_with_retry("http://127.0.0.1:1", "addr", "grpc", 1, rx).await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn registration_stops_when_shutdown_arrives_while_retrying() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = tx.send(true);
+        });
+
+        let result = register_with_retry("http://127.0.0.1:1", "addr", "grpc", 1, rx).await;
+
+        assert!(result.is_none());
+    }
 }

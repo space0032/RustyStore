@@ -9,7 +9,7 @@ use crate::placement::place_replicas;
 #[allow(unused_imports)]
 use crate::types::{ChunkLocationEntry, ChunkManifestEntry, ClusterStats, Manifest, NodeInfoEntry};
 use futures_util::stream::Stream;
-use metadata::models::{ChunkReplicaRow, StorageNodeRow};
+use metadata::models::{ChunkReplicaRow, ChunkRow, StorageNodeRow};
 use metadata::{MetadataStore, ReplicationTaskRow};
 use proto::storage::{
     CapacityReport, ChunkLocation, ChunkReference, CompleteUploadRequest, CompleteUploadResponse,
@@ -78,6 +78,36 @@ fn source_candidates(
     }
     for replica in replicas.iter().filter(|r| r.durable) {
         consider(replica.node_id);
+    }
+    candidates
+}
+
+/// Order the nodes to try as replication targets.
+///
+/// The task's recorded target is preferred, then the other healthy nodes. The
+/// source and any node that already has a replica row (durable or not) are
+/// excluded, so a target is only attempted once.
+fn target_candidates(
+    preferred: Uuid,
+    healthy: &[Uuid],
+    replicas: &[ChunkReplicaRow],
+    source: Uuid,
+) -> Vec<Uuid> {
+    let healthy_set: std::collections::HashSet<Uuid> = healthy.iter().copied().collect();
+    let occupied: std::collections::HashSet<Uuid> = replicas.iter().map(|r| r.node_id).collect();
+    let mut candidates = Vec::new();
+    let mut consider = |node_id: Uuid| {
+        if node_id != source
+            && healthy_set.contains(&node_id)
+            && !occupied.contains(&node_id)
+            && !candidates.contains(&node_id)
+        {
+            candidates.push(node_id);
+        }
+    };
+    consider(preferred);
+    for node_id in healthy {
+        consider(*node_id);
     }
     candidates
 }
@@ -282,31 +312,22 @@ impl Coordinator {
     }
 
     /// Execute a single replication task: transfer chunk from a source replica
-    /// to the target. If the recorded source is unhealthy or fails mid-transfer,
-    /// try the chunk's other healthy durable replicas before failing the task.
+    /// to a target. If the recorded source is unhealthy or fails mid-transfer,
+    /// try the chunk's other healthy durable replicas. If the recorded target
+    /// is unhealthy or fails, try another healthy node that does not already
+    /// hold the chunk.
     async fn execute_recovery_task(
         store: &Arc<MetadataStore>,
         task: ReplicationTaskRow,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunk_id = task.chunk_id;
-        let target_node_id = task.target_node_id;
+        let preferred_target = task.target_node_id;
         let preferred_source = task.source_node_id;
 
         // Look up node addresses.
         let nodes = store.all_nodes().await?;
         let node_map: std::collections::HashMap<Uuid, StorageNodeRow> =
             nodes.into_iter().map(|n| (n.node_id, n)).collect();
-
-        let Some(target_node) = node_map.get(&target_node_id) else {
-            warn!(
-                "target node {} not found, failing task {}",
-                target_node_id, task.task_id
-            );
-            store
-                .mark_task_failed(task.task_id, task.attempts + 1)
-                .await?;
-            return Ok(());
-        };
 
         // Get chunk metadata (SHA-256, size) from the chunks table.
         let Some(chunk_row) = store.get_chunk(chunk_id).await? else {
@@ -324,16 +345,13 @@ impl Coordinator {
         // an ordered candidate list: the recorded source first (if still
         // healthy), then every other healthy durable replica of the chunk.
         let replicas = store.replicas_for_chunk(chunk_id).await?;
-        let healthy: std::collections::HashSet<Uuid> = store
-            .healthy_nodes()
-            .await?
-            .into_iter()
-            .map(|n| n.node_id)
-            .collect();
-        let candidates = source_candidates(preferred_source, &replicas, &healthy, target_node_id);
+        let healthy_nodes = store.healthy_nodes().await?;
+        let healthy_ids: Vec<Uuid> = healthy_nodes.iter().map(|n| n.node_id).collect();
+        let healthy: std::collections::HashSet<Uuid> = healthy_ids.iter().copied().collect();
+        let sources = source_candidates(preferred_source, &replicas, &healthy, preferred_target);
 
-        let mut chunk_data = None;
-        for source_node_id in candidates {
+        let mut source_and_data = None;
+        for source_node_id in sources {
             let Some(source_node) = node_map.get(&source_node_id) else {
                 warn!("source node {source_node_id} has a replica but no node row; skipping");
                 continue;
@@ -347,7 +365,7 @@ impl Coordinator {
                             task.task_id
                         );
                     }
-                    chunk_data = Some(data);
+                    source_and_data = Some((source_node_id, data));
                     break;
                 }
                 Err(e) => warn!(
@@ -356,7 +374,7 @@ impl Coordinator {
             }
         }
 
-        let Some(chunk_data) = chunk_data else {
+        let Some((source_node_id, chunk_data)) = source_and_data else {
             warn!(
                 "no usable source replica for chunk {chunk_id}, failing task {}",
                 task.task_id
@@ -367,14 +385,80 @@ impl Coordinator {
             return Ok(());
         };
 
-        // Connect to target node and push chunk data via streaming gRPC.
+        // The recorded target may also have died or lost its lease. Try it
+        // first, then any other healthy node that does not already hold the
+        // chunk. Nodes with even a non-durable replica row are skipped.
+        let targets = target_candidates(preferred_target, &healthy_ids, &replicas, source_node_id);
+        if targets.is_empty() {
+            warn!(
+                "chunk {chunk_id} has no healthy target node for replication, failing task {}",
+                task.task_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        }
+
+        let mut stored_on = None;
+        for target_node_id in targets {
+            let Some(target_node) = node_map.get(&target_node_id) else {
+                warn!("target node {target_node_id} has no node row; skipping");
+                continue;
+            };
+            match Self::push_chunk_to_target(target_node, &chunk_row, &chunk_data).await {
+                Ok(()) => {
+                    if target_node_id != preferred_target {
+                        info!(
+                            "recovery task {} using alternate target {target_node_id}",
+                            task.task_id
+                        );
+                    }
+                    stored_on = Some(target_node_id);
+                    break;
+                }
+                Err(e) => warn!(
+                    "target node {target_node_id} failed for chunk {chunk_id}: {e}; trying another node"
+                ),
+            }
+        }
+
+        let Some(target_node_id) = stored_on else {
+            warn!(
+                "no usable target node for chunk {chunk_id}, failing task {}",
+                task.task_id
+            );
+            store
+                .mark_task_failed(task.task_id, task.attempts + 1)
+                .await?;
+            return Ok(());
+        };
+
+        // Mark replica as durable in metadata.
+        store.insert_replica(chunk_id, target_node_id, true).await?;
+        store.mark_task_done(task.task_id).await?;
+
+        info!(
+            "recovery task {} complete: chunk {} -> node {} (durable confirmed)",
+            task.task_id, chunk_id, target_node_id
+        );
+
+        Ok(())
+    }
+
+    /// Push verified chunk bytes to one target and require a durable ack.
+    async fn push_chunk_to_target(
+        target_node: &StorageNodeRow,
+        chunk_row: &ChunkRow,
+        chunk_data: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let target_addr = format!("http://{}", target_node.grpc_addr);
         let mut target_client = ChunkServiceClient::connect(target_addr).await?;
 
         let meta = StoreChunkRequest {
             payload: Some(proto::storage::store_chunk_request::Payload::Meta(
                 ChunkReference {
-                    chunk_id: chunk_id.to_string(),
+                    chunk_id: chunk_row.chunk_id.to_string(),
                     file_id: String::new(),
                     chunk_index: 0,
                     size_bytes: chunk_row.size_bytes,
@@ -384,11 +468,11 @@ impl Coordinator {
             )),
         };
 
-        let chunk_data_clone = chunk_data.clone();
+        let data = chunk_data.to_vec();
         let frame_size = 64 * 1024;
         let store_stream = async_stream::stream! {
             yield meta;
-            for chunk in chunk_data_clone.chunks(frame_size) {
+            for chunk in data.chunks(frame_size) {
                 yield StoreChunkRequest {
                     payload: Some(proto::storage::store_chunk_request::Payload::Data(chunk.to_vec())),
                 };
@@ -401,25 +485,12 @@ impl Coordinator {
             .into_inner();
 
         if !store_response.durable {
-            warn!(
-                "target node {} did not confirm durable storage for chunk {}",
-                target_node_id, chunk_id
-            );
-            store
-                .mark_task_failed(task.task_id, task.attempts + 1)
-                .await?;
-            return Ok(());
+            return Err(format!(
+                "target node {} did not confirm durable storage",
+                target_node.node_id
+            )
+            .into());
         }
-
-        // Mark replica as durable in metadata.
-        store.insert_replica(chunk_id, target_node_id, true).await?;
-        store.mark_task_done(task.task_id).await?;
-
-        info!(
-            "recovery task {} complete: chunk {} -> node {} (durable confirmed)",
-            task.task_id, chunk_id, target_node_id
-        );
-
         Ok(())
     }
 
@@ -1181,7 +1252,7 @@ impl CoordinatorServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_file_cursor, encode_file_cursor, source_candidates};
+    use super::{decode_file_cursor, encode_file_cursor, source_candidates, target_candidates};
     use chrono::{TimeZone, Utc};
     use metadata::models::ChunkReplicaRow;
     use std::collections::HashSet;
@@ -1259,5 +1330,44 @@ mod tests {
         let replicas = vec![replica(target, true), replica(live, false)];
 
         assert!(source_candidates(None, &replicas, &healthy, target).is_empty());
+    }
+
+    #[test]
+    fn target_candidates_prefers_recorded_target() {
+        let target = Uuid::new_v4();
+        let spare = Uuid::new_v4();
+        let source = Uuid::new_v4();
+        let healthy = vec![spare, target, source];
+        let replicas = vec![replica(source, true)];
+
+        assert_eq!(
+            target_candidates(target, &healthy, &replicas, source),
+            vec![target, spare]
+        );
+    }
+
+    #[test]
+    fn target_candidates_skips_unhealthy_target_and_occupied_nodes() {
+        let dead_target = Uuid::new_v4();
+        let occupied = Uuid::new_v4();
+        let spare = Uuid::new_v4();
+        let source = Uuid::new_v4();
+        let healthy = vec![occupied, source, spare];
+        let replicas = vec![replica(source, true), replica(occupied, false)];
+
+        assert_eq!(
+            target_candidates(dead_target, &healthy, &replicas, source),
+            vec![spare]
+        );
+    }
+
+    #[test]
+    fn target_candidates_empty_when_no_eligible_node() {
+        let target = Uuid::new_v4();
+        let source = Uuid::new_v4();
+        let healthy = vec![source, target];
+        let replicas = vec![replica(source, true), replica(target, true)];
+
+        assert!(target_candidates(target, &healthy, &replicas, source).is_empty());
     }
 }
