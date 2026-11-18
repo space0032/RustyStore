@@ -78,9 +78,9 @@ Service binaries:
 
 | Binary | Default listen | Key environment variables |
 |---|---|---|
-| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC` |
-| `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR` |
-| `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `COORDINATOR_ADDRS`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES` |
+| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC`, `GRPC_TLS_*` |
+| `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR`, `GRPC_TLS_*` |
+| `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `COORDINATOR_ADDRS`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES`, `GRPC_TLS_*` |
 
 Configuration is validated at startup: an unparsable value or an out-of-range
 number (for example `REPLICATION_FACTOR=0` or `MAX_UPLOAD_BYTES=10MB`) exits
@@ -140,6 +140,26 @@ The gateway accepts a comma-separated `COORDINATOR_ADDRS` list (falling back to
 `COORDINATOR_ADDR`) and retries transient gRPC failures on the next coordinator.
 This is HA-lite: leadership is serialized through PostgreSQL rather than a
 consensus protocol, and writes still require at least one healthy coordinator.
+
+### gRPC TLS/mTLS
+
+Service-to-service gRPC is plaintext by default. To enable encryption, set
+`GRPC_TLS_CERT` and `GRPC_TLS_KEY` on the coordinator and storage nodes. Add
+`GRPC_TLS_CLIENT_CA` to require client certificates, and set `GRPC_TLS_CA`,
+`GRPC_TLS_CLIENT_CERT`, and `GRPC_TLS_CLIENT_KEY` on every gRPC client
+(gateway, coordinator, storage nodes). `GRPC_TLS_DOMAIN` overrides the expected
+server name.
+
+For local mTLS, generate development certificates and use the Compose overlay:
+
+```bash
+./scripts/gen-certs.sh
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+```
+
+HTTP health and metrics ports stay plaintext for probes; terminate client TLS at
+a reverse proxy in production. Certificates are loaded at startup, so rotate
+them with a rolling restart.
 
 ### Observability
 

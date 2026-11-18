@@ -13,6 +13,22 @@ cargo run -p gateway
 The coordinator applies the embedded schema on startup; no separate migration
 step is required. `docker compose up --build` starts the full stack.
 
+## gRPC TLS/mTLS
+
+Set `GRPC_TLS_CERT` and `GRPC_TLS_KEY` on the coordinator and storage nodes to
+encrypt gRPC. Add `GRPC_TLS_CLIENT_CA` on servers to require client
+certificates. Every gRPC client needs `GRPC_TLS_CA`; with mTLS it also needs
+`GRPC_TLS_CLIENT_CERT` and `GRPC_TLS_CLIENT_KEY`.
+
+```bash
+./scripts/gen-certs.sh
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+```
+
+Certificates are read once at startup; rotate with a rolling restart. HTTP
+health and metrics ports remain plaintext for probes and should be exposed only
+through a TLS-terminating proxy.
+
 ## Health checks
 
 - Gateway: `GET /api/v1/health` (liveness), `GET /api/v1/ready` (coordinator probe)
