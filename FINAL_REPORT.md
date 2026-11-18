@@ -96,7 +96,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-28.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-29.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -152,8 +152,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 26 | Request-ID Propagation to gRPC | Complete | Task-local id attached to coordinator/storage-node gRPC metadata, incl. spawned tasks |
 | 27 | Durable Replica Recording on Commit | Complete | `ChunkManifest.node_ids`, atomic chunk+replica insert, empty replica list rejected |
 | 28 | Replication Task Deduplication | Complete | One live task per chunk; stale `in_progress` tasks expire after 5 minutes |
+| 29 | Orphan-Chunk GC & Stale Upload Reaper | Complete | `ListChunks` RPC, grace-period collection, TTL reaping of abandoned uploads |
 
-Phase documentation: `PHASE-1.md` through `PHASE-28.md`
+Phase documentation: `PHASE-1.md` through `PHASE-29.md`
 
 ---
 
@@ -207,7 +208,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Unit Tests (61 unit + 6 integration = 67 total, all passing)
+### Unit Tests (66 unit + 6 integration = 72 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -222,7 +223,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 10. `scope_opt_none_leaves_unset` — `None` does not create a scope
 11. `scope_opt_some_sets_id` — `Some` scopes the id
 
-**storage-engine** (8 tests):
+**storage-engine** (9 tests):
 1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
 2. `test_retrieve_nonexistent_chunk` — NotFound error
 3. `test_integrity_mismatch_on_store` — reject mismatched SHA-256 on write
@@ -231,8 +232,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 6. `test_streaming_reader` — open chunk reader + verify hash
 7. `test_get_capacity` — disk capacity query
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
+9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
 
-**coordinator** (12 tests):
+**coordinator** (15 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -245,6 +247,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 10. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
 11. `attaches_current_request_id` — client attaches scoped id as gRPC metadata
 12. `omits_header_without_scope` — no metadata when no request id is scoped
+13. `deletes_only_old_unreferenced_chunks` — GC keeps referenced and fresh chunks
+14. `skips_non_uuid_ids` — GC ignores non-UUID filenames
+15. `keeps_chunks_at_exactly_the_cutoff` — grace period is inclusive
 
 **gateway** (20 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
@@ -271,16 +276,17 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 **observability** (1 test):
 1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
 
-**storage-node** (9 tests: 4 gRPC + 5 HTTP):
+**storage-node** (10 tests: 5 gRPC + 5 HTTP):
 1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`, asserts storage counters advance
 2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
 3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
-4. `metrics_render_prometheus_text` — storage node `/metrics` exposes Prometheus text including storage counters
-5. `health_returns_ok` — `/health` returns 200 with `service: storage-node`
-6. `ready_reports_200_when_storage_ok` — `/ready` 200 when the volume is usable
-7. `ready_reports_503_when_storage_down` — `/ready` 503 when the volume probe fails
-8. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
-9. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
+4. `grpc_list_chunks_reports_stored_chunks` — streaming `ListChunks` returns stored ids, sizes, and mtimes
+5. `metrics_render_prometheus_text` — storage node `/metrics` exposes Prometheus text including storage counters
+6. `health_returns_ok` — `/health` returns 200 with `service: storage-node`
+7. `ready_reports_200_when_storage_ok` — `/ready` 200 when the volume is usable
+8. `ready_reports_503_when_storage_down` — `/ready` 503 when the volume probe fails
+9. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
+10. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
 
 **integration** (6 tests):
 1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
@@ -350,7 +356,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 5. **No priority queue** — all recovery tasks equal priority (FIFO)
 6. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
 7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
-8. **Rejected in-flight uploads leave orphaned chunks** — chunks stored before the size limit is hit are not reclaimed by a sweeper
+8. **PostgreSQL-backed integration tests are not automated yet** — SQL paths are covered by in-process fakes and manual runs
 
 ---
 
@@ -377,6 +383,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **Request-ID propagation** — a task-local id is attached to outgoing gRPC calls and re-scoped across `tokio::spawn` boundaries (upload replica fan-out, download streaming)
 - **Replica metadata committed with files** — uploads record durable replicas in the same transaction as the chunk and file rows, so manifests are downloadable and deletion can locate chunk bytes
 - **Replication task deduplication** — one live task per chunk prevents detector-tick task storms, with stale in-progress tasks expiring so recovery cannot wedge
+- **Orphan-chunk GC** — coordinator lists chunks on healthy nodes, subtracts metadata references, and reclaims bytes older than a grace period; abandoned uploads are reaped on a TTL
 - **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
 - **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
 - **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits

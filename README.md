@@ -77,7 +77,7 @@ Service binaries:
 
 | Binary | Default listen | Key environment variables |
 |---|---|---|
-| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES` |
+| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS` |
 | `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR` |
 | `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES` |
 
@@ -98,6 +98,13 @@ deletes the chunk bytes from the storage nodes that held them. Byte deletion is
 best-effort: a failure leaves unreferenced chunks (safe to garbage-collect) but
 never metadata pointing at missing data. Deleting an unknown file returns 404.
 
+The coordinator periodically reclaims orphaned chunk bytes (for example from
+uploads rejected by `MAX_UPLOAD_BYTES` or client disconnects) by listing chunks
+on healthy nodes and deleting any that have no metadata row and are older than
+`ORPHAN_GRACE_SECS`. Uploads that never complete are reaped after
+`UPLOAD_SESSION_TTL_SECS`. Set `ORPHAN_GC_INTERVAL_SECS=0` to disable the
+collector.
+
 
 ### Observability
 
@@ -106,9 +113,9 @@ never metadata pointing at missing data. Deleting an unknown file returns 404.
 - Storage node: `GET /metrics`, `GET /health` (liveness), `GET /ready` (storage probe) on `STORAGE_NODE_HTTP_ADDR` (default `0.0.0.0:8082`)
 
 All `/metrics` endpoints expose Prometheus text format. Gateway metrics cover
-upload/download bytes and failures; coordinator metrics cover active nodes and
-under-replicated chunks; storage nodes report chunks/bytes stored and chunks
-deleted.
+upload/download bytes and failures; coordinator metrics cover active nodes,
+under-replicated chunks, reclaimed orphan chunks/bytes, and reaped stale
+uploads; storage nodes report chunks/bytes stored and chunks deleted.
 
 Every HTTP request gets an `x-request-id` (incoming or generated). The gateway
 attaches it to outgoing gRPC calls — including calls made from spawned upload
