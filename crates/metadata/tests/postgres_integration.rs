@@ -1,0 +1,314 @@
+//! PostgreSQL-backed integration tests for `MetadataStore`.
+//!
+//! These exercise the real SQL paths that in-process fakes cannot cover:
+//! replica rows written during upload commit, FK cascades on delete,
+//! under-replication detection, replication-task deduplication, and the
+//! orphan/upload-reaper helpers.
+//!
+//! They run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) is set and point
+//! at a disposable database. `scripts/test-postgres.ps1` / `.sh` provision one
+//! with Docker. Without a URL the tests return early so a plain
+//! `cargo test --workspace` still works offline.
+
+use metadata::MetadataStore;
+use std::sync::OnceLock;
+use tokio::sync::{Mutex, MutexGuard};
+use uuid::Uuid;
+
+fn database_url() -> Option<String> {
+    std::env::var("TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+}
+
+fn lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Connect, migrate, and start each test from empty tables. The mutex keeps
+/// the shared database deterministic despite Rust's parallel test runner.
+async fn setup() -> Option<(MetadataStore, MutexGuard<'static, ()>)> {
+    let url = database_url()?;
+    let guard = lock().lock().await;
+    let store = MetadataStore::connect_and_migrate(&url)
+        .await
+        .expect("connect to TEST_DATABASE_URL");
+
+    sqlx::raw_sql(
+        "TRUNCATE replication_tasks, chunk_replicas, chunks, upload_sessions, files, storage_nodes CASCADE",
+    )
+    .execute(store.pool())
+    .await
+    .expect("truncate");
+
+    Some((store, guard))
+}
+
+async fn node(store: &MetadataStore) -> Uuid {
+    let node_id = Uuid::new_v4();
+    store
+        .upsert_node(
+            node_id,
+            "127.0.0.1:9000",
+            "127.0.0.1:50051",
+            1_000_000,
+            1_000_000,
+            0,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            Some("test"),
+        )
+        .await
+        .expect("insert node");
+    node_id
+}
+
+async fn file(store: &MetadataStore, replication_factor: i32) -> Uuid {
+    let file_id = Uuid::new_v4();
+    store
+        .create_file(file_id, "test.bin", 12, 4, 3, replication_factor)
+        .await
+        .expect("insert file");
+    file_id
+}
+
+fn sha() -> String {
+    "a".repeat(64)
+}
+
+async fn insert_chunk(store: &MetadataStore, file_id: Uuid, chunk_id: Uuid, node_ids: &[Uuid]) {
+    let mut tx = store.pool().begin().await.expect("begin");
+    MetadataStore::insert_chunk_with_replicas(&mut tx, chunk_id, &sha(), 4, 0, file_id, node_ids)
+        .await
+        .expect("insert chunk + replicas");
+    tx.commit().await.expect("commit");
+}
+
+#[tokio::test]
+async fn complete_upload_records_chunks_and_durable_replicas() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let file_id = file(&store, 2).await;
+    let upload_id = Uuid::new_v4();
+    store
+        .create_upload_session(upload_id, Some(file_id))
+        .await
+        .unwrap();
+
+    let chunk_id = Uuid::new_v4();
+    let mut tx = store.pool().begin().await.unwrap();
+    MetadataStore::insert_chunk_with_replicas(&mut tx, chunk_id, &sha(), 4, 0, file_id, &[n1, n2])
+        .await
+        .unwrap();
+    sqlx::query("UPDATE files SET status='committed', updated_at=now() WHERE file_id=$1")
+        .bind(file_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE upload_sessions SET status='committed', completed_at=now() WHERE upload_id=$1",
+    )
+    .bind(upload_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let chunks = store.chunks_for_file(file_id).await.unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].chunk_id, chunk_id);
+    assert_eq!(chunks[0].sha256_hex.trim(), sha());
+
+    let replicas = store.replicas_for_chunk(chunk_id).await.unwrap();
+    assert_eq!(replicas.len(), 2, "both gateway-reported nodes recorded");
+    assert!(replicas.iter().all(|r| r.durable));
+    assert_eq!(store.durable_replica_count(chunk_id).await.unwrap(), 2);
+
+    assert!(
+        store.under_replicated_chunks().await.unwrap().is_empty(),
+        "a committed file with rf replicas is not under-replicated"
+    );
+
+    let committed = store.get_file(file_id).await.unwrap().unwrap();
+    assert_eq!(committed.status, "committed");
+}
+
+#[tokio::test]
+async fn deleting_file_cascades_chunks_replicas_sessions_and_tasks() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let file_id = file(&store, 2).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1, n2]).await;
+
+    let upload_id = Uuid::new_v4();
+    store
+        .create_upload_session(upload_id, Some(file_id))
+        .await
+        .unwrap();
+    let task_id = Uuid::new_v4();
+    store
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5)
+        .await
+        .unwrap();
+
+    sqlx::query("DELETE FROM files WHERE file_id=$1")
+        .bind(file_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    assert!(store.get_file(file_id).await.unwrap().is_none());
+    assert!(store.chunks_for_file(file_id).await.unwrap().is_empty());
+    assert!(store.replicas_for_chunk(chunk_id).await.unwrap().is_empty());
+
+    let sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM upload_sessions WHERE upload_id=$1")
+            .bind(upload_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(sessions, 0, "upload session cascades with the file");
+
+    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM replication_tasks WHERE chunk_id=$1")
+        .bind(chunk_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(tasks, 0, "replication tasks cascade with the chunk");
+}
+
+#[tokio::test]
+async fn replication_task_dedup_and_stale_in_progress() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let _n3 = node(&store).await;
+    let file_id = file(&store, 3).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+
+    let under = store.under_replicated_chunks().await.unwrap();
+    assert_eq!(under.len(), 1);
+    assert_eq!(under[0].0, chunk_id);
+    assert_eq!(under[0].2, 3, "required replicas comes from the file");
+    assert_eq!(under[0].3, 1, "only the durable replica counts");
+
+    let task_id = Uuid::new_v4();
+    store
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5)
+        .await
+        .unwrap();
+    assert!(store.has_active_replication_task(chunk_id).await.unwrap());
+
+    // A fresh in-progress task blocks duplicates.
+    store.mark_task_in_progress(task_id).await.unwrap();
+    assert!(store.has_active_replication_task(chunk_id).await.unwrap());
+
+    // An in-progress task older than five minutes is considered abandoned.
+    sqlx::query(
+        "UPDATE replication_tasks SET updated_at = now() - INTERVAL '10 minutes' WHERE task_id=$1",
+    )
+    .bind(task_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert!(!store.has_active_replication_task(chunk_id).await.unwrap());
+
+    store.mark_task_done(task_id).await.unwrap();
+    assert!(!store.has_active_replication_task(chunk_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn claim_replication_task_marks_in_progress_once() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let file_id = file(&store, 2).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+
+    let task_id = Uuid::new_v4();
+    store
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5)
+        .await
+        .unwrap();
+
+    let claimed = store
+        .claim_replication_task()
+        .await
+        .unwrap()
+        .expect("pending task is claimed");
+    assert_eq!(claimed.task_id, task_id);
+    assert_eq!(claimed.status, "in_progress");
+    assert!(
+        store.claim_replication_task().await.unwrap().is_none(),
+        "a claimed task is not handed out twice"
+    );
+}
+
+#[tokio::test]
+async fn existing_chunk_ids_and_stale_upload_reaping() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let file_id = file(&store, 1).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+
+    let unknown = Uuid::new_v4();
+    let existing = store
+        .existing_chunk_ids(&[chunk_id, unknown])
+        .await
+        .unwrap();
+    assert_eq!(existing, vec![chunk_id]);
+
+    // A committed file survives the reaper.
+    sqlx::query("UPDATE files SET status='committed', updated_at=now() WHERE file_id=$1")
+        .bind(file_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    // An abandoned upload (file stuck in `uploading`) is removed with its
+    // session via the FK cascade.
+    let stale_file = Uuid::new_v4();
+    store
+        .create_file(stale_file, "stale.bin", 8, 4, 2, 1)
+        .await
+        .unwrap();
+    let stale_session = Uuid::new_v4();
+    store
+        .create_upload_session(stale_session, Some(stale_file))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE files SET updated_at = now() - INTERVAL '2 hours' WHERE file_id=$1")
+        .bind(stale_file)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let reaped = store.reap_stale_uploads(3600).await.unwrap();
+    assert_eq!(reaped, 1, "only the stale uploading file is removed");
+    assert!(store.get_file(stale_file).await.unwrap().is_none());
+    assert!(store.get_file(file_id).await.unwrap().is_some());
+
+    let sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM upload_sessions WHERE upload_id=$1")
+            .bind(stale_session)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(sessions, 0, "stale session cascades with its file");
+}
