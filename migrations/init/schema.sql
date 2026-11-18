@@ -87,12 +87,17 @@ CREATE TABLE IF NOT EXISTS replication_tasks (
   source_node_id UUID REFERENCES storage_nodes(node_id),
   target_node_id UUID NOT NULL REFERENCES storage_nodes(node_id),
   status         TEXT NOT NULL DEFAULT 'pending', -- pending, in_progress, done, failed
+  priority       INT NOT NULL DEFAULT 0,          -- higher runs first
   attempts       INT NOT NULL DEFAULT 0,
   max_attempts   INT NOT NULL DEFAULT 5,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Existing deployments created before the priority column was added.
+ALTER TABLE replication_tasks ADD COLUMN IF NOT EXISTS priority INT NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_status ON replication_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_replication_tasks_queue ON replication_tasks(status, priority DESC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_target ON replication_tasks(target_node_id);
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_chunk ON replication_tasks(chunk_id);

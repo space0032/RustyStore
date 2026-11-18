@@ -522,5 +522,23 @@ async fn recovery_replaces_a_failed_replica() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(downloaded, data);
 
+    let surviving_source = chunk
+        .node_ids
+        .iter()
+        .copied()
+        .find(|id| *id != dead_node)
+        .expect("surviving source replica");
+    let (task_status, source, target): (String, Option<Uuid>, Uuid) = sqlx::query_as(
+        "SELECT status, source_node_id, target_node_id FROM replication_tasks \
+         WHERE chunk_id=$1 AND status='done' ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(chunk.chunk_id)
+    .fetch_one(&stack.pool)
+    .await
+    .expect("completed replication task");
+    assert_eq!(task_status, "done");
+    assert_eq!(source, Some(surviving_source), "actual source persisted");
+    assert_eq!(target, spare, "actual target persisted");
+
     stack.shutdown().await;
 }

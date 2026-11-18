@@ -54,11 +54,18 @@ impl CoordinatorServer {
         chunk_size_bytes: i64,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let recovery_bandwidth_bytes_per_sec = std::env::var("RECOVERY_BANDWIDTH_BYTES_PER_SEC")
+            .ok()
+            .map(|raw| common::config::parse_value::<u64>("RECOVERY_BANDWIDTH_BYTES_PER_SEC", &raw))
+            .transpose()?
+            .filter(|rate| *rate > 0);
+
         let coordinator = Coordinator::new(
             store,
             replication_factor,
             chunk_size_bytes,
             crate::gc::GcConfig::from_env()?,
+            recovery_bandwidth_bytes_per_sec,
         );
         let svc = coordinator.service();
 

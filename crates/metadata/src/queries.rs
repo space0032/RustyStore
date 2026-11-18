@@ -219,7 +219,7 @@ impl MetadataStore {
             WHERE task_id = (
                 SELECT task_id FROM replication_tasks
                 WHERE status='pending'
-                ORDER BY created_at ASC
+                ORDER BY priority DESC, created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -597,17 +597,19 @@ impl MetadataStore {
         source_node_id: Option<Uuid>,
         target_node_id: Uuid,
         max_attempts: i32,
+        priority: i32,
     ) -> sqlx::Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO replication_tasks (task_id, chunk_id, source_node_id, target_node_id, status, attempts, max_attempts, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,'pending',0,$5,now(),now())
+            INSERT INTO replication_tasks (task_id, chunk_id, source_node_id, target_node_id, status, priority, attempts, max_attempts, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,'pending',$5,0,$6,now(),now())
             "#,
         )
         .bind(task_id)
         .bind(chunk_id)
         .bind(source_node_id)
         .bind(target_node_id)
+        .bind(priority)
         .bind(max_attempts)
         .execute(&self.pool)
         .await?;
@@ -616,7 +618,7 @@ impl MetadataStore {
 
     pub async fn pending_replication_tasks(&self) -> sqlx::Result<Vec<ReplicationTaskRow>> {
         let rows = sqlx::query_as::<_, ReplicationTaskRow>(
-            "SELECT * FROM replication_tasks WHERE status='pending' ORDER BY created_at ASC",
+            "SELECT * FROM replication_tasks WHERE status='pending' ORDER BY priority DESC, created_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -638,6 +640,30 @@ impl MetadataStore {
             "UPDATE replication_tasks SET status='done', updated_at=now() WHERE task_id=$1",
         )
         .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark a task done and record the nodes that actually served as source and
+    /// target. Recovery may have failed over to different nodes than the task
+    /// originally named, so the completed row reflects reality.
+    pub async fn mark_task_done_with_nodes(
+        &self,
+        task_id: Uuid,
+        source_node_id: Option<Uuid>,
+        target_node_id: Uuid,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE replication_tasks
+            SET status='done', source_node_id=$2, target_node_id=$3, updated_at=now()
+            WHERE task_id=$1
+            "#,
+        )
+        .bind(task_id)
+        .bind(source_node_id)
+        .bind(target_node_id)
         .execute(&self.pool)
         .await?;
         Ok(())

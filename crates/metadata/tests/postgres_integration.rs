@@ -154,7 +154,7 @@ async fn deleting_file_cascades_chunks_replicas_sessions_and_tasks() {
         .unwrap();
     let task_id = Uuid::new_v4();
     store
-        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5)
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5, 0)
         .await
         .unwrap();
 
@@ -204,7 +204,7 @@ async fn replication_task_dedup_and_stale_in_progress() {
 
     let task_id = Uuid::new_v4();
     store
-        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5)
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5, 0)
         .await
         .unwrap();
     assert!(store.has_active_replication_task(chunk_id).await.unwrap());
@@ -240,7 +240,7 @@ async fn claim_replication_task_marks_in_progress_once() {
 
     let task_id = Uuid::new_v4();
     store
-        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5)
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5, 0)
         .await
         .unwrap();
 
@@ -391,4 +391,51 @@ async fn existing_chunk_ids_and_stale_upload_reaping() {
             .await
             .unwrap();
     assert_eq!(sessions, 0, "stale session cascades with its file");
+}
+
+#[tokio::test]
+async fn replication_task_priority_order_and_actual_nodes() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let n3 = node(&store).await;
+    let file_id = file(&store, 2).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+
+    let low = Uuid::new_v4();
+    store
+        .create_replication_task(low, chunk_id, Some(n1), n2, 5, 1)
+        .await
+        .unwrap();
+    let high = Uuid::new_v4();
+    store
+        .create_replication_task(high, chunk_id, Some(n1), n3, 5, 5)
+        .await
+        .unwrap();
+
+    let claimed = store
+        .claim_replication_task()
+        .await
+        .unwrap()
+        .expect("pending task is claimed");
+    assert_eq!(claimed.task_id, high, "higher priority is claimed first");
+    assert_eq!(claimed.priority, 5);
+
+    store
+        .mark_task_done_with_nodes(high, Some(n2), n3)
+        .await
+        .unwrap();
+    let (status, source, target): (String, Option<Uuid>, Uuid) = sqlx::query_as(
+        "SELECT status, source_node_id, target_node_id FROM replication_tasks WHERE task_id=$1",
+    )
+    .bind(high)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(status, "done");
+    assert_eq!(source, Some(n2), "actual source is persisted");
+    assert_eq!(target, n3, "actual target is persisted");
 }

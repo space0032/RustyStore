@@ -74,6 +74,7 @@ pub struct ReplicationTaskRow {
     pub source_node_id: Option<Uuid>,
     pub target_node_id: Uuid,
     pub status: String,
+    pub priority: i32,
     pub attempts: i32,
     pub max_attempts: i32,
     pub created_at: DateTime<Utc>,

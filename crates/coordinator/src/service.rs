@@ -8,7 +8,8 @@ use crate::gc::{self, GcConfig};
 use crate::placement::place_replicas;
 #[allow(unused_imports)]
 use crate::types::{ChunkLocationEntry, ChunkManifestEntry, ClusterStats, Manifest, NodeInfoEntry};
-use futures_util::stream::Stream;
+use futures_util::StreamExt;
+use futures_util::stream::{FuturesUnordered, Stream};
 use metadata::models::{ChunkReplicaRow, ChunkRow, StorageNodeRow};
 use metadata::{MetadataStore, ReplicationTaskRow};
 use proto::storage::{
@@ -37,6 +38,21 @@ type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
 const DEFAULT_LIST_LIMIT: i32 = 50;
 const MAX_LIST_LIMIT: i32 = 200;
+
+/// Delay needed to transfer `bytes` at the configured rate, if any.
+fn throttle_delay(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) -> Option<Duration> {
+    let rate = bandwidth_bytes_per_sec.filter(|rate| *rate > 0)?;
+    if bytes == 0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(bytes as f64 / rate as f64))
+}
+
+async fn throttle(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) {
+    if let Some(delay) = throttle_delay(bandwidth_bytes_per_sec, bytes) {
+        tokio::time::sleep(delay).await;
+    }
+}
 
 /// Opaque keyset cursor: `<created_at_micros>:<file_id>`.
 fn encode_file_cursor(created_at: chrono::DateTime<chrono::Utc>, file_id: Uuid) -> String {
@@ -141,6 +157,7 @@ impl Coordinator {
         replication_factor: i32,
         chunk_size_bytes: i64,
         gc_config: Option<GcConfig>,
+        recovery_bandwidth_bytes_per_sec: Option<u64>,
     ) -> Self {
         let service = CoordinatorService::new(store.clone(), replication_factor, chunk_size_bytes);
 
@@ -193,7 +210,13 @@ impl Coordinator {
                     let store = store.clone();
                     let semaphore = semaphore.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::run_recovery_batch(&store, semaphore).await {
+                        if let Err(e) = Self::run_recovery_batch(
+                            &store,
+                            semaphore,
+                            recovery_bandwidth_bytes_per_sec,
+                        )
+                        .await
+                        {
                             warn!("recovery scheduler batch error: {e}");
                         }
                     });
@@ -222,7 +245,7 @@ impl Coordinator {
         let under_replicated = store.under_replicated_chunks().await?;
         observability::UNDER_REPLICATED_CHUNKS.set(under_replicated.len() as i64);
 
-        for (chunk_id, _file_id, _required, _actual) in under_replicated {
+        for (chunk_id, _file_id, required, actual) in under_replicated {
             // One active task per chunk: the detector ticks every 10s, and
             // without this check a slow or failing replication would enqueue
             // another task each tick.
@@ -264,6 +287,7 @@ impl Coordinator {
 
             if let Some(target_node_id) = targets.first() {
                 let task_id = Uuid::new_v4();
+                let priority = (i64::from(required) - actual).clamp(1, i64::from(i32::MAX)) as i32;
                 store
                     .create_replication_task(
                         task_id,
@@ -271,10 +295,11 @@ impl Coordinator {
                         Some(source_node_id),
                         *target_node_id,
                         5,
+                        priority,
                     )
                     .await?;
                 info!(
-                    "created replication task for chunk {chunk_id}: node {source_node_id} -> {}",
+                    "created replication task for chunk {chunk_id}: node {source_node_id} -> {} (priority {priority})",
                     target_node_id
                 );
             }
@@ -288,6 +313,7 @@ impl Coordinator {
     async fn run_recovery_batch(
         store: &Arc<MetadataStore>,
         semaphore: Arc<tokio::sync::Semaphore>,
+        bandwidth_bytes_per_sec: Option<u64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Claim up to 8 pending tasks.
         let mut tasks = Vec::new();
@@ -309,7 +335,9 @@ impl Coordinator {
             let permit = semaphore.clone().acquire_owned().await?;
             join_set.spawn(async move {
                 let _permit = permit;
-                if let Err(e) = Self::execute_recovery_task(&store, task).await {
+                if let Err(e) =
+                    Self::execute_recovery_task(&store, task, bandwidth_bytes_per_sec).await
+                {
                     warn!("recovery task error: {e}");
                 }
             });
@@ -329,6 +357,7 @@ impl Coordinator {
     async fn execute_recovery_task(
         store: &Arc<MetadataStore>,
         task: ReplicationTaskRow,
+        bandwidth_bytes_per_sec: Option<u64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunk_id = task.chunk_id;
         let preferred_target = task.target_node_id;
@@ -361,13 +390,30 @@ impl Coordinator {
         let sources = source_candidates(preferred_source, &replicas, &healthy, preferred_target);
 
         let mut source_and_data = None;
+        let mut fetches = FuturesUnordered::new();
         for source_node_id in sources {
-            let Some(source_node) = node_map.get(&source_node_id) else {
+            let Some(source_node) = node_map.get(&source_node_id).cloned() else {
                 warn!("source node {source_node_id} has a replica but no node row; skipping");
                 continue;
             };
-            match Self::retrieve_verified_chunk(source_node, chunk_id, &chunk_row.sha256_hex).await
-            {
+            let expected_sha256 = chunk_row.sha256_hex.clone();
+            fetches.push(async move {
+                let result = Self::retrieve_verified_chunk(
+                    &source_node,
+                    chunk_id,
+                    &expected_sha256,
+                    bandwidth_bytes_per_sec,
+                )
+                .await;
+                (source_node_id, result)
+            });
+        }
+
+        // Race the candidate sources and use the first verified response. The
+        // remaining in-flight transfers are cancelled when `fetches` is
+        // dropped, so a slow or corrupt replica cannot delay recovery.
+        while let Some((source_node_id, result)) = fetches.next().await {
+            match result {
                 Ok(data) => {
                     if preferred_source != Some(source_node_id) {
                         info!(
@@ -379,7 +425,7 @@ impl Coordinator {
                     break;
                 }
                 Err(e) => warn!(
-                    "source node {source_node_id} failed for chunk {chunk_id}: {e}; trying another replica"
+                    "source node {source_node_id} failed for chunk {chunk_id}: {e}; waiting for another replica"
                 ),
             }
         }
@@ -416,7 +462,14 @@ impl Coordinator {
                 warn!("target node {target_node_id} has no node row; skipping");
                 continue;
             };
-            match Self::push_chunk_to_target(target_node, &chunk_row, &chunk_data).await {
+            match Self::push_chunk_to_target(
+                target_node,
+                &chunk_row,
+                &chunk_data,
+                bandwidth_bytes_per_sec,
+            )
+            .await
+            {
                 Ok(()) => {
                     if target_node_id != preferred_target {
                         info!(
@@ -461,6 +514,7 @@ impl Coordinator {
         target_node: &StorageNodeRow,
         chunk_row: &ChunkRow,
         chunk_data: &[u8],
+        bandwidth_bytes_per_sec: Option<u64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let target_addr = node_endpoint(&target_node.grpc_addr);
         let mut target_client = ChunkServiceClient::connect(target_addr).await?;
@@ -483,6 +537,7 @@ impl Coordinator {
         let store_stream = async_stream::stream! {
             yield meta;
             for chunk in data.chunks(frame_size) {
+                throttle(bandwidth_bytes_per_sec, chunk.len()).await;
                 yield StoreChunkRequest {
                     payload: Some(proto::storage::store_chunk_request::Payload::Data(chunk.to_vec())),
                 };
@@ -510,6 +565,7 @@ impl Coordinator {
         source_node: &StorageNodeRow,
         chunk_id: Uuid,
         expected_sha256: &str,
+        bandwidth_bytes_per_sec: Option<u64>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let source_addr = node_endpoint(&source_node.grpc_addr);
         let mut source_client = ChunkServiceClient::connect(source_addr).await?;
@@ -528,6 +584,7 @@ impl Coordinator {
             match frame.payload {
                 Some(proto::storage::retrieve_chunk_response::Payload::Meta(_)) => {}
                 Some(proto::storage::retrieve_chunk_response::Payload::Data(data)) => {
+                    throttle(bandwidth_bytes_per_sec, data.len()).await;
                     chunk_data.extend_from_slice(&data);
                 }
                 None => {}
@@ -705,9 +762,12 @@ impl Coordinator {
             return Ok(());
         }
 
-        // Mark replica as durable in metadata.
+        // Mark replica as durable in metadata and record the nodes that
+        // actually completed the transfer (failover may have changed them).
         store.insert_replica(chunk_id, target_node_id, true).await?;
-        store.mark_task_done(task.task_id).await?;
+        store
+            .mark_task_done_with_nodes(task.task_id, Some(source_node_id), target_node_id)
+            .await?;
 
         info!(
             "recovery task {} complete: chunk {} -> node {} (durable confirmed)",
@@ -1263,11 +1323,13 @@ impl CoordinatorServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_file_cursor, encode_file_cursor, node_endpoint, source_candidates, target_candidates,
+        decode_file_cursor, encode_file_cursor, node_endpoint, source_candidates,
+        target_candidates, throttle_delay,
     };
     use chrono::{TimeZone, Utc};
     use metadata::models::ChunkReplicaRow;
     use std::collections::HashSet;
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn replica(node_id: Uuid, durable: bool) -> ChunkReplicaRow {
@@ -1304,6 +1366,21 @@ mod tests {
             let err = decode_file_cursor(cursor).expect_err("invalid cursor");
             assert_eq!(err.code(), tonic::Code::InvalidArgument);
         }
+    }
+
+    #[test]
+    fn throttle_delay_matches_configured_rate() {
+        assert_eq!(throttle_delay(None, 1024), None);
+        assert_eq!(throttle_delay(Some(0), 1024), None);
+        assert_eq!(throttle_delay(Some(1000), 0), None);
+        assert_eq!(
+            throttle_delay(Some(1000), 500),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            throttle_delay(Some(1_000_000), 2_000_000),
+            Some(Duration::from_secs(2))
+        );
     }
 
     #[test]
