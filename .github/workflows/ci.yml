@@ -78,8 +78,8 @@ jobs:
           done
           exit 1
 
-      - name: Run S3 integration tests (MinIO)
-        run: cargo test -p storage-engine --features s3 --test s3_integration
+      - name: Run S3 unit and integration tests (MinIO)
+        run: cargo test -p storage-engine --features s3
 
   docker:
     name: Build ${{ matrix.service }} image

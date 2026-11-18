@@ -540,6 +540,60 @@ async fn recovery_replaces_a_failed_replica() {
 }
 
 #[tokio::test]
+async fn soak_repeated_upload_download_delete_cycles() {
+    let Some(_guard) = database_url().map(|_| db_lock().lock()) else {
+        return;
+    };
+    let _guard = _guard.await;
+    let Some(stack) = start_stack(2, 3).await else {
+        return;
+    };
+
+    let iterations: usize = std::env::var("RUSTYSTORE_SOAK_ITERATIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(6)
+        .clamp(1, 50);
+
+    for i in 0..iterations {
+        let data = payload(2 * 1024 * 1024 + i * 8191, i as u8);
+        let expected_chunks = data.len().div_ceil(CHUNK_SIZE as usize) as u64;
+        let (status, json) = upload(&stack.app, &format!("soak-{i}.bin"), &data).await;
+        assert_eq!(status, StatusCode::OK, "soak upload {i} failed: {json}");
+        assert_eq!(json["chunk_count"].as_u64(), Some(expected_chunks));
+        let file_id = json["file_id"].as_str().expect("file id").to_string();
+
+        let (status, downloaded) = download(&stack.app, &file_id).await;
+        assert_eq!(status, StatusCode::OK, "soak download {i} failed");
+        assert_eq!(downloaded, data, "soak download {i} corrupted");
+
+        let delete = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/files/{file_id}"))
+            .body(Body::empty())
+            .expect("delete request");
+        let delete_response = stack.app.clone().oneshot(delete).await.expect("delete");
+        assert_eq!(delete_response.status(), StatusCode::OK);
+        let delete_body = axum::body::to_bytes(delete_response.into_body(), usize::MAX)
+            .await
+            .expect("delete body");
+        let delete_json: serde_json::Value =
+            serde_json::from_slice(&delete_body).expect("delete json");
+        assert_eq!(delete_json["chunks"].as_u64(), Some(expected_chunks));
+        assert_eq!(
+            delete_json["chunk_replicas_deleted"].as_u64(),
+            Some(expected_chunks * 2)
+        );
+
+        let (status, _) = download(&stack.app, &file_id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    assert_eq!(stack.stored_chunk_count(), 0, "soak leaked chunk files");
+    stack.shutdown().await;
+}
+
+#[tokio::test]
 async fn gateway_fails_over_between_coordinators() {
     let Some(_guard) = database_url().map(|_| db_lock().lock()) else {
         return;
