@@ -58,6 +58,16 @@ fail claimed tasks, or publish durable replicas after losing the lease. A
 recovery write that finishes after fencing leaves unreferenced chunk bytes for
 orphan GC rather than corrupting metadata.
 
+## Coordinator discovery
+
+Each coordinator registers `COORDINATOR_ADVERTISE_ADDR` in PostgreSQL and
+renews a 15-second lease every 5 seconds. Gateways bootstrap from
+`COORDINATOR_ADDRS` (or `COORDINATOR_ADDR`) and refresh their endpoint pool from
+`ListCoordinators` every 15 seconds. Set the advertised address to a
+peer-reachable host:port when the bind address is `0.0.0.0`; Compose uses
+`coordinator:50051`. Expired registry rows are removed by the leader after one
+hour.
+
 ## Simulating failure
 
 ```bash

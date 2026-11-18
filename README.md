@@ -78,7 +78,7 @@ Service binaries:
 
 | Binary | Default listen | Key environment variables |
 |---|---|---|
-| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC`, `RECOVERY_AGGREGATE_BYTES_PER_SEC`, `RECOVERY_PRIORITY_AGING_SECS`, `GRPC_TLS_*` |
+| `coordinator` | `0.0.0.0:50051` | `DATABASE_URL`, `COORDINATOR_ADDR`, `COORDINATOR_ADVERTISE_ADDR`, `COORDINATOR_HTTP_ADDR`, `REPLICATION_FACTOR`, `CHUNK_SIZE_BYTES`, `ORPHAN_GC_INTERVAL_SECS`, `ORPHAN_GRACE_SECS`, `UPLOAD_SESSION_TTL_SECS`, `RECOVERY_BANDWIDTH_BYTES_PER_SEC`, `RECOVERY_AGGREGATE_BYTES_PER_SEC`, `RECOVERY_PRIORITY_AGING_SECS`, `GRPC_TLS_*` |
 | `storage-node` | `0.0.0.0:50051` | `COORDINATOR_ADDR`, `NODE_ADDR`, `ADVERTISED_ADDR`, `STORAGE_PATH`, `NODE_CAPACITY_BYTES`, `STORAGE_NODE_HTTP_ADDR`, `GRPC_TLS_*` |
 | `gateway` | `0.0.0.0:8080` | `GATEWAY_ADDR`, `COORDINATOR_ADDR`, `COORDINATOR_ADDRS`, `API_KEY`, `REQUIRE_AUTH`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_UPLOAD_BYTES`, `GRPC_TLS_*` |
 
@@ -150,6 +150,9 @@ or publish replicas/task completions for work it no longer owns.
 
 The gateway accepts a comma-separated `COORDINATOR_ADDRS` list (falling back to
 `COORDINATOR_ADDR`) and retries transient gRPC failures on the next coordinator.
+Coordinators also register their reachable `COORDINATOR_ADVERTISE_ADDR` in
+PostgreSQL with a renewable lease; the gateway refreshes its endpoint pool from
+that registry every 15 seconds, so only one bootstrap address is required.
 This is HA-lite: leadership is serialized through PostgreSQL rather than a
 consensus protocol, and writes still require at least one healthy coordinator.
 
