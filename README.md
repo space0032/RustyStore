@@ -30,7 +30,6 @@ Client (HTTP) -> Gateway (Axum) <-> Coordinator (Tonic gRPC) <-> Storage Nodes (
 | `coordinator` | Node registration, health, placement, manifest management |
 | `storage-node` | Tonic gRPC server for chunk store/retrieve/replicate |
 | `gateway` | Axum HTTP gateway, streaming upload/download |
-| `replication` | Recovery scheduling, re-replication |
 | `observability` | Tracing + Prometheus metrics |
 
 ## Prerequisites
@@ -110,6 +109,11 @@ on healthy nodes and deleting any that have no metadata row and are older than
 `ORPHAN_GRACE_SECS`. Uploads that never complete are reaped after
 `UPLOAD_SESSION_TTL_SECS`. Set `ORPHAN_GC_INTERVAL_SECS=0` to disable the
 collector.
+
+Recovery treats a task's recorded source as a hint. If that node is unhealthy,
+unreachable, or returns bytes that fail SHA-256 verification, the coordinator
+retries the transfer from another healthy durable replica before failing the
+task.
 
 
 ### Observability

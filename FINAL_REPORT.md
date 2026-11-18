@@ -64,7 +64,7 @@ Communication:
 
 ```
 distributed-storage/
-├── Cargo.toml              # Workspace root (12 members)
+├── Cargo.toml              # Workspace root (11 members)
 ├── rust-toolchain.toml     # Stable, 2024 edition
 ├── .env.example            # Environment configuration template
 ├── .dockerignore           # Keeps images small and workspace-complete
@@ -79,7 +79,6 @@ distributed-storage/
 │   ├── coordinator/        # Node registration, health, placement, replication scheduling (+ coordinator binary)
 │   ├── storage-node/       # Tonic gRPC server for chunk store/retrieve/replicate (+ storage-node binary)
 │   ├── gateway/            # Axum HTTP gateway, streaming upload/download, auth (+ gateway binary)
-│   ├── replication/        # Recovery scheduling (placeholder for future expansion)
 │   └── observability/      # Tracing + Prometheus metrics setup
 ├── migrations/
 │   └── init/schema.sql     # PostgreSQL initial schema
@@ -100,7 +99,7 @@ distributed-storage/
 │   ├── adr/ADR-001-centralized-coordinator.md
 │   ├── operations/README.md
 │   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
-├── PHASE-1.md through PHASE-32.md    # Phase-by-phase development log
+├── PHASE-1.md through PHASE-33.md    # Phase-by-phase development log
 └── scripts/                    # Fault injection and smoke test scripts
 ```
 
@@ -116,7 +115,6 @@ metadata        (common, sqlx)
 coordinator     (proto, metadata, common, tonic, tokio, tracing)
 storage-node    (proto, storage-engine, metadata, common, tonic, tokio, tracing)
 gateway         (common, proto, coordinator, storage-engine, axum, tower-http, tracing)
-replication     (common, metadata, coordinator)
 observability   (tracing, prometheus)
 ```
 
@@ -160,8 +158,9 @@ Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks
 | 30 | PostgreSQL-Backed Integration Tests | Complete | `metadata/tests/postgres_integration.rs`, `scripts/test-postgres.{sh,ps1}` |
 | 31 | Paginated File Listing | Complete | `ListFiles` RPC, keyset cursor, `GET /api/v1/files` |
 | 32 | Graceful HTTP Shutdown, CI, Container Builds | Complete | Shared shutdown fan-out, `.github/workflows/ci.yml`, workspace-complete Dockerfiles |
+| 33 | Recovery Source Failover | Complete | Ordered healthy durable replicas, per-source SHA-256 verification, dead `replication` crate removed |
 
-Phase documentation: `PHASE-1.md` through `PHASE-32.md`
+Phase documentation: `PHASE-1.md` through `PHASE-33.md`
 
 ---
 
@@ -216,7 +215,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 
 ## Testing & Benchmarks
 
-### Tests (70 unit + 6 integration + 6 PostgreSQL-backed = 82 total, all passing)
+### Tests (73 unit + 6 integration + 6 PostgreSQL-backed = 85 total, all passing)
 
 **common** (11 tests):
 1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
@@ -242,7 +241,7 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 8. `test_atomic_write_no_partial_visible` — atomic write pattern
 9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
 
-**coordinator** (18 tests):
+**coordinator** (21 tests):
 1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
 2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
 3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
@@ -261,6 +260,9 @@ Full OpenAPI spec: `docs/api/openapi.yaml`
 16. `file_cursor_roundtrips` — list cursor preserves the exact timestamp and id
 17. `file_cursor_rejects_garbage` — malformed cursors return `InvalidArgument`
 18. `graceful_shutdown_stops_http_server` — the HTTP probe server drains and releases its port on shutdown
+19. `source_candidates_prefers_recorded_source` — the task's source is tried first, then other replicas
+20. `source_candidates_falls_back_when_recorded_source_unhealthy` — an unhealthy source is skipped for a live replica
+21. `source_candidates_excludes_target_and_non_durable_replicas` — destination and non-durable rows never become sources
 
 **gateway** (20 tests):
 1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
@@ -386,18 +388,18 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 
 1. **Single Coordinator SPOF** — new writes require the Coordinator; designed for HA evolution
 2. **S3 backend feature-gated** — `cargo build --features storage-engine/s3` required
-3. **No source node failover** during recovery — if source dies mid-transfer, task fails and retries
-4. **No bandwidth throttling** for replication traffic
-5. **No priority queue** — all recovery tasks equal priority (FIFO)
-6. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
-7. **TLS/mTLS not implemented** — recommended at reverse proxy layer
-8. **PostgreSQL integration tests skip without a database** — locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
+3. **No bandwidth throttling** for replication traffic
+4. **No priority queue** — all recovery tasks equal priority (FIFO)
+5. **Rate limiting is per-process** — the token bucket lives in each gateway instance and is not shared across replicas
+6. **TLS/mTLS not implemented** — recommended at reverse proxy layer
+7. **PostgreSQL integration tests skip without a database** — locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there
+8. **Recovery failover is sequential** — candidate sources are tried one at a time; a successful failover does not rewrite the task's recorded source
 
 ---
 
 ## Engineering Achievements
 
-- **Multi-crate Cargo workspace** with acyclic dependency graph (12 crates)
+- **Multi-crate Cargo workspace** with acyclic dependency graph (11 crates)
 - **Runnable service binaries** — coordinator, storage-node, gateway with env config + JSON tracing
 - **Self-migrating coordinator** — embedded idempotent schema, no external migration step
 - **Node registration + heartbeat** — client-streaming register, auto-reconnecting bidi heartbeat lease renewal
@@ -429,7 +431,9 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 - **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
 - **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
 - **Coordinator-authoritative chunking** — the coordinator supplies chunk size and replication factor; the gateway uses them, so manifests match actual placement
-- **82 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
+- **Recovery source failover** — replication tries the recorded source first, then any other healthy durable replica, verifying SHA-256 per source before writing to the target
+- **Dead-code removal** — the unused `crates/replication` placeholder is gone; the coordinator owns the scheduler (workspace now 11 crates)
+- **85 passing tests** across common config, storage engine, coordinator, gateway, storage node (in-process gRPC + HTTP), observability, integration, and PostgreSQL-backed metadata
 - **Criterion benchmarks** for SHA-256 throughput and storage I/O
 
 ---
@@ -475,4 +479,4 @@ MIT
 
 ---
 
-*Generated as part of the RustyStore distributed storage system project. All phases (1–32) implemented and committed.*
+*Generated as part of the RustyStore distributed storage system project. All phases (1–33) implemented and committed.*
