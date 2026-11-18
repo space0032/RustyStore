@@ -77,6 +77,7 @@ pub struct ReplicationTaskRow {
     pub priority: i32,
     pub attempts: i32,
     pub max_attempts: i32,
+    pub claimed_epoch: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

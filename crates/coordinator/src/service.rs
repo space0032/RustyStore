@@ -28,8 +28,8 @@ use proto::storage::{
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
@@ -60,8 +60,44 @@ fn throttle_delay(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) -> Option<
     Some(Duration::from_secs_f64(bytes as f64 / rate as f64))
 }
 
-async fn throttle(bandwidth_bytes_per_sec: Option<u64>, bytes: usize) {
-    if let Some(delay) = throttle_delay(bandwidth_bytes_per_sec, bytes) {
+/// Aggregate recovery bandwidth across every concurrent transfer.
+///
+/// Each caller reserves the next slice of wall-clock time before sleeping, so
+/// four recoveries cannot each consume the per-transfer rate independently.
+struct AggregateThrottle {
+    bytes_per_sec: f64,
+    next_available: std::sync::Mutex<Instant>,
+}
+
+impl AggregateThrottle {
+    fn new(bytes_per_sec: u64) -> Self {
+        Self {
+            bytes_per_sec: bytes_per_sec as f64,
+            next_available: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+
+    fn reserve(&self, bytes: usize) -> Duration {
+        if bytes == 0 || self.bytes_per_sec <= 0.0 {
+            return Duration::ZERO;
+        }
+        let mut next = self.next_available.lock().unwrap();
+        let now = Instant::now();
+        let start = (*next).max(now);
+        *next = start + Duration::from_secs_f64(bytes as f64 / self.bytes_per_sec);
+        start.saturating_duration_since(now)
+    }
+}
+
+async fn throttle_transfer(
+    aggregate: Option<&AggregateThrottle>,
+    per_transfer_bytes_per_sec: Option<u64>,
+    bytes: usize,
+) {
+    let aggregate_delay = aggregate.map_or(Duration::ZERO, |aggregate| aggregate.reserve(bytes));
+    let per_transfer_delay = throttle_delay(per_transfer_bytes_per_sec, bytes).unwrap_or_default();
+    let delay = aggregate_delay.max(per_transfer_delay);
+    if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
 }
@@ -166,15 +202,23 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<MetadataStore>,
         replication_factor: i32,
         chunk_size_bytes: i64,
         gc_config: Option<GcConfig>,
         recovery_bandwidth_bytes_per_sec: Option<u64>,
+        recovery_aggregate_bytes_per_sec: Option<u64>,
+        recovery_priority_aging_secs: i64,
     ) -> Self {
         let service = CoordinatorService::new(store.clone(), replication_factor, chunk_size_bytes);
         let is_leader = Arc::new(AtomicBool::new(false));
+        let leader_epoch = Arc::new(AtomicI64::new(0));
+        let leader_id = Uuid::new_v4();
+        let aggregate_throttle = recovery_aggregate_bytes_per_sec
+            .filter(|rate| *rate > 0)
+            .map(|rate| Arc::new(AggregateThrottle::new(rate)));
 
         // Leadership: only the coordinator holding the database lease runs
         // background work. Every coordinator can serve gateway RPCs, so the
@@ -182,30 +226,51 @@ impl Coordinator {
         let leadership = {
             let store = store.clone();
             let is_leader = is_leader.clone();
-            let leader_id = Uuid::new_v4();
+            let leader_epoch = leader_epoch.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(LEADERSHIP_RENEW_INTERVAL);
                 let mut was_leader = false;
+                let mut last_epoch = 0;
                 loop {
                     interval.tick().await;
                     match store
                         .try_acquire_leadership(leader_id, LEADERSHIP_LEASE_MS)
                         .await
                     {
-                        Ok(leader) => {
-                            is_leader.store(leader, Ordering::Relaxed);
-                            observability::COORDINATOR_IS_LEADER.set(i64::from(leader));
-                            if leader != was_leader {
-                                if leader {
-                                    info!("coordinator {leader_id} acquired leadership");
-                                } else {
-                                    info!("coordinator {leader_id} is a standby");
+                        Ok(Some(epoch)) => {
+                            is_leader.store(true, Ordering::Relaxed);
+                            leader_epoch.store(epoch, Ordering::Relaxed);
+                            observability::COORDINATOR_IS_LEADER.set(1);
+                            if !was_leader || epoch != last_epoch {
+                                info!("coordinator {leader_id} acquired leadership epoch {epoch}");
+                                if epoch != last_epoch {
+                                    match store.fail_replication_tasks_claimed_before(epoch).await {
+                                        Ok(0) => {}
+                                        Ok(failed) => info!(
+                                            "failed {failed} recovery task(s) claimed before \
+                                             epoch {epoch}"
+                                        ),
+                                        Err(e) => warn!(
+                                            "failed to clean up pre-epoch {epoch} recovery tasks: {e}"
+                                        ),
+                                    }
                                 }
-                                was_leader = leader;
+                                was_leader = true;
+                                last_epoch = epoch;
+                            }
+                        }
+                        Ok(None) => {
+                            is_leader.store(false, Ordering::Relaxed);
+                            leader_epoch.store(0, Ordering::Relaxed);
+                            observability::COORDINATOR_IS_LEADER.set(0);
+                            if was_leader {
+                                info!("coordinator {leader_id} is a standby");
+                                was_leader = false;
                             }
                         }
                         Err(e) => {
                             is_leader.store(false, Ordering::Relaxed);
+                            leader_epoch.store(0, Ordering::Relaxed);
                             observability::COORDINATOR_IS_LEADER.set(0);
                             if was_leader {
                                 warn!("lost coordinator leadership: {e}");
@@ -280,6 +345,8 @@ impl Coordinator {
         let recovery_scheduler = {
             let store = store.clone();
             let is_leader = is_leader.clone();
+            let leader_epoch = leader_epoch.clone();
+            let aggregate_throttle = aggregate_throttle.clone();
             let interval = Duration::from_secs(5);
             let max_concurrent = 4usize;
             tokio::spawn(async move {
@@ -290,13 +357,22 @@ impl Coordinator {
                     if !is_leader.load(Ordering::Relaxed) {
                         continue;
                     }
+                    let epoch = leader_epoch.load(Ordering::Relaxed);
+                    if epoch <= 0 {
+                        continue;
+                    }
                     let store = store.clone();
                     let semaphore = semaphore.clone();
+                    let aggregate_throttle = aggregate_throttle.clone();
                     tokio::spawn(async move {
                         if let Err(e) = Self::run_recovery_batch(
                             &store,
                             semaphore,
                             recovery_bandwidth_bytes_per_sec,
+                            aggregate_throttle,
+                            leader_id,
+                            epoch,
+                            recovery_priority_aging_secs,
                         )
                         .await
                         {
@@ -394,15 +470,23 @@ impl Coordinator {
 
     /// Run one recovery batch: claim multiple pending tasks and process them
     /// concurrently with bounded semaphore.
+    #[allow(clippy::too_many_arguments)]
     async fn run_recovery_batch(
         store: &Arc<MetadataStore>,
         semaphore: Arc<tokio::sync::Semaphore>,
         bandwidth_bytes_per_sec: Option<u64>,
+        aggregate_throttle: Option<Arc<AggregateThrottle>>,
+        leader_id: Uuid,
+        epoch: i64,
+        priority_aging_secs: i64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Claim up to 8 pending tasks.
         let mut tasks = Vec::new();
         for _ in 0..8 {
-            match store.claim_replication_task().await? {
+            match store
+                .claim_replication_task(epoch, priority_aging_secs)
+                .await?
+            {
                 Some(task) => tasks.push(task),
                 None => break,
             }
@@ -416,11 +500,19 @@ impl Coordinator {
         let mut join_set = tokio::task::JoinSet::new();
         for task in tasks {
             let store = store.clone();
+            let aggregate_throttle = aggregate_throttle.clone();
             let permit = semaphore.clone().acquire_owned().await?;
             join_set.spawn(async move {
                 let _permit = permit;
-                if let Err(e) =
-                    Self::execute_recovery_task(&store, task, bandwidth_bytes_per_sec).await
+                if let Err(e) = Self::execute_recovery_task(
+                    &store,
+                    task,
+                    bandwidth_bytes_per_sec,
+                    aggregate_throttle.clone(),
+                    leader_id,
+                    epoch,
+                )
+                .await
                 {
                     warn!("recovery task error: {e}");
                 }
@@ -442,6 +534,9 @@ impl Coordinator {
         store: &Arc<MetadataStore>,
         task: ReplicationTaskRow,
         bandwidth_bytes_per_sec: Option<u64>,
+        aggregate_throttle: Option<Arc<AggregateThrottle>>,
+        leader_id: Uuid,
+        epoch: i64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunk_id = task.chunk_id;
         let preferred_target = task.target_node_id;
@@ -458,9 +553,7 @@ impl Coordinator {
                 "chunk {chunk_id} not found in metadata, failing task {}",
                 task.task_id
             );
-            store
-                .mark_task_failed(task.task_id, task.attempts + 1)
-                .await?;
+            Self::fail_recovery_task(store, &task, epoch).await?;
             return Ok(());
         };
 
@@ -481,12 +574,14 @@ impl Coordinator {
                 continue;
             };
             let expected_sha256 = chunk_row.sha256_hex.clone();
+            let aggregate_throttle = aggregate_throttle.clone();
             fetches.push(async move {
                 let result = Self::retrieve_verified_chunk(
                     &source_node,
                     chunk_id,
                     &expected_sha256,
                     bandwidth_bytes_per_sec,
+                    aggregate_throttle,
                 )
                 .await;
                 (source_node_id, result)
@@ -519,9 +614,7 @@ impl Coordinator {
                 "no usable source replica for chunk {chunk_id}, failing task {}",
                 task.task_id
             );
-            store
-                .mark_task_failed(task.task_id, task.attempts + 1)
-                .await?;
+            Self::fail_recovery_task(store, &task, epoch).await?;
             return Ok(());
         };
 
@@ -534,9 +627,7 @@ impl Coordinator {
                 "chunk {chunk_id} has no healthy target node for replication, failing task {}",
                 task.task_id
             );
-            store
-                .mark_task_failed(task.task_id, task.attempts + 1)
-                .await?;
+            Self::fail_recovery_task(store, &task, epoch).await?;
             return Ok(());
         }
 
@@ -551,6 +642,7 @@ impl Coordinator {
                 &chunk_row,
                 &chunk_data,
                 bandwidth_bytes_per_sec,
+                aggregate_throttle.clone(),
             )
             .await
             {
@@ -575,15 +667,31 @@ impl Coordinator {
                 "no usable target node for chunk {chunk_id}, failing task {}",
                 task.task_id
             );
-            store
-                .mark_task_failed(task.task_id, task.attempts + 1)
-                .await?;
+            Self::fail_recovery_task(store, &task, epoch).await?;
             return Ok(());
         };
 
-        // Mark replica as durable in metadata.
-        store.insert_replica(chunk_id, target_node_id, true).await?;
-        store.mark_task_done(task.task_id).await?;
+        // Publish the durable replica and complete the task only if this
+        // leader still owns the lease epoch. A fenced leader leaves the target
+        // bytes unreferenced for orphan GC instead of corrupting metadata.
+        let completed = store
+            .complete_replication_task_fenced(
+                task.task_id,
+                chunk_id,
+                Some(source_node_id),
+                target_node_id,
+                leader_id,
+                epoch,
+            )
+            .await?;
+        if !completed {
+            warn!(
+                "recovery task {} finished after leadership epoch {epoch} was fenced; \
+                 not publishing replica on node {target_node_id}",
+                task.task_id
+            );
+            return Ok(());
+        }
 
         info!(
             "recovery task {} complete: chunk {} -> node {} (durable confirmed)",
@@ -593,12 +701,31 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Fail a claimed task, but only while this leader epoch still owns it.
+    async fn fail_recovery_task(
+        store: &MetadataStore,
+        task: &ReplicationTaskRow,
+        epoch: i64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let updated = store
+            .mark_task_failed_fenced(task.task_id, task.attempts + 1, epoch)
+            .await?;
+        if !updated {
+            warn!(
+                "recovery task {} is no longer owned by epoch {epoch}; failure not recorded",
+                task.task_id
+            );
+        }
+        Ok(())
+    }
+
     /// Push verified chunk bytes to one target and require a durable ack.
     async fn push_chunk_to_target(
         target_node: &StorageNodeRow,
         chunk_row: &ChunkRow,
         chunk_data: &[u8],
         bandwidth_bytes_per_sec: Option<u64>,
+        aggregate_throttle: Option<Arc<AggregateThrottle>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let target_addr = node_endpoint(&target_node.grpc_addr);
         let mut target_client = ChunkServiceClient::new(common::tls::connect(&target_addr).await?);
@@ -621,7 +748,7 @@ impl Coordinator {
         let store_stream = async_stream::stream! {
             yield meta;
             for chunk in data.chunks(frame_size) {
-                throttle(bandwidth_bytes_per_sec, chunk.len()).await;
+                throttle_transfer(aggregate_throttle.as_deref(), bandwidth_bytes_per_sec, chunk.len()).await;
                 yield StoreChunkRequest {
                     payload: Some(proto::storage::store_chunk_request::Payload::Data(chunk.to_vec())),
                 };
@@ -650,6 +777,7 @@ impl Coordinator {
         chunk_id: Uuid,
         expected_sha256: &str,
         bandwidth_bytes_per_sec: Option<u64>,
+        aggregate_throttle: Option<Arc<AggregateThrottle>>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let source_addr = node_endpoint(&source_node.grpc_addr);
         let mut source_client = ChunkServiceClient::new(common::tls::connect(&source_addr).await?);
@@ -668,7 +796,12 @@ impl Coordinator {
             match frame.payload {
                 Some(proto::storage::retrieve_chunk_response::Payload::Meta(_)) => {}
                 Some(proto::storage::retrieve_chunk_response::Payload::Data(data)) => {
-                    throttle(bandwidth_bytes_per_sec, data.len()).await;
+                    throttle_transfer(
+                        aggregate_throttle.as_deref(),
+                        bandwidth_bytes_per_sec,
+                        data.len(),
+                    )
+                    .await;
                     chunk_data.extend_from_slice(&data);
                 }
                 None => {}

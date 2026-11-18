@@ -59,6 +59,16 @@ impl CoordinatorServer {
             .map(|raw| common::config::parse_value::<u64>("RECOVERY_BANDWIDTH_BYTES_PER_SEC", &raw))
             .transpose()?
             .filter(|rate| *rate > 0);
+        let recovery_aggregate_bytes_per_sec = std::env::var("RECOVERY_AGGREGATE_BYTES_PER_SEC")
+            .ok()
+            .map(|raw| common::config::parse_value::<u64>("RECOVERY_AGGREGATE_BYTES_PER_SEC", &raw))
+            .transpose()?
+            .filter(|rate| *rate > 0);
+        let recovery_priority_aging_secs: i64 =
+            common::config::parse_env("RECOVERY_PRIORITY_AGING_SECS", 60)?;
+        if recovery_priority_aging_secs < 0 {
+            return Err("RECOVERY_PRIORITY_AGING_SECS must not be negative".into());
+        }
 
         let coordinator = Coordinator::new(
             store,
@@ -66,6 +76,8 @@ impl CoordinatorServer {
             chunk_size_bytes,
             crate::gc::GcConfig::from_env()?,
             recovery_bandwidth_bytes_per_sec,
+            recovery_aggregate_bytes_per_sec,
+            recovery_priority_aging_secs,
         );
         let svc = coordinator.service();
 

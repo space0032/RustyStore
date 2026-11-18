@@ -16,8 +16,12 @@ CREATE TABLE IF NOT EXISTS coordinator_leader (
   singleton    BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   leader_id    UUID NOT NULL,
   lease_expiry TIMESTAMPTZ NOT NULL,
+  epoch        BIGINT NOT NULL DEFAULT 0,
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Existing deployments created before the fencing epoch was added.
+ALTER TABLE coordinator_leader ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 0;
 
 -- storage nodes
 CREATE TABLE IF NOT EXISTS storage_nodes (
@@ -104,6 +108,8 @@ CREATE TABLE IF NOT EXISTS replication_tasks (
 
 -- Existing deployments created before the priority column was added.
 ALTER TABLE replication_tasks ADD COLUMN IF NOT EXISTS priority INT NOT NULL DEFAULT 0;
+-- Epoch of the leader that claimed the task; stale leaders cannot complete it.
+ALTER TABLE replication_tasks ADD COLUMN IF NOT EXISTS claimed_epoch BIGINT;
 
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_status ON replication_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_replication_tasks_queue ON replication_tasks(status, priority DESC, created_at ASC);

@@ -76,6 +76,14 @@ fn sha() -> String {
     "a".repeat(64)
 }
 
+async fn become_leader(store: &MetadataStore) -> i64 {
+    store
+        .try_acquire_leadership(Uuid::new_v4(), 15_000)
+        .await
+        .unwrap()
+        .expect("acquire leadership")
+}
+
 async fn insert_chunk(store: &MetadataStore, file_id: Uuid, chunk_id: Uuid, node_ids: &[Uuid]) {
     let mut tx = store.pool().begin().await.expect("begin");
     MetadataStore::insert_chunk_with_replicas(&mut tx, chunk_id, &sha(), 4, 0, file_id, node_ids)
@@ -244,15 +252,21 @@ async fn claim_replication_task_marks_in_progress_once() {
         .await
         .unwrap();
 
+    let epoch = become_leader(&store).await;
     let claimed = store
-        .claim_replication_task()
+        .claim_replication_task(epoch, 0)
         .await
         .unwrap()
         .expect("pending task is claimed");
     assert_eq!(claimed.task_id, task_id);
     assert_eq!(claimed.status, "in_progress");
+    assert_eq!(claimed.claimed_epoch, Some(epoch));
     assert!(
-        store.claim_replication_task().await.unwrap().is_none(),
+        store
+            .claim_replication_task(epoch, 0)
+            .await
+            .unwrap()
+            .is_none(),
         "a claimed task is not handed out twice"
     );
 }
@@ -487,8 +501,9 @@ async fn replication_task_priority_order_and_actual_nodes() {
         .await
         .unwrap();
 
+    let epoch = become_leader(&store).await;
     let claimed = store
-        .claim_replication_task()
+        .claim_replication_task(epoch, 0)
         .await
         .unwrap()
         .expect("pending task is claimed");
@@ -509,6 +524,101 @@ async fn replication_task_priority_order_and_actual_nodes() {
     assert_eq!(status, "done");
     assert_eq!(source, Some(n2), "actual source is persisted");
     assert_eq!(target, n3, "actual target is persisted");
+}
+
+#[tokio::test]
+async fn new_leader_fails_tasks_claimed_by_older_epochs() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let file_id = file(&store, 2).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+    let task_id = Uuid::new_v4();
+    store
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5, 1)
+        .await
+        .unwrap();
+
+    let first = become_leader(&store).await;
+    store
+        .claim_replication_task(first, 0)
+        .await
+        .unwrap()
+        .expect("first leader claims the task");
+
+    sqlx::query("UPDATE coordinator_leader SET lease_expiry = now() - INTERVAL '1 second'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let second = store
+        .try_acquire_leadership(Uuid::new_v4(), 15_000)
+        .await
+        .unwrap()
+        .expect("second leader takes over");
+    assert!(second > first);
+
+    assert_eq!(
+        store
+            .fail_replication_tasks_claimed_before(second)
+            .await
+            .unwrap(),
+        1
+    );
+    let (status, attempts, max_attempts): (String, i32, i32) = sqlx::query_as(
+        "SELECT status, attempts, max_attempts FROM replication_tasks WHERE task_id=$1",
+    )
+    .bind(task_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(attempts, max_attempts);
+}
+
+#[tokio::test]
+async fn replication_task_priority_ages_to_avoid_starvation() {
+    let Some((store, _guard)) = setup().await else {
+        return;
+    };
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let n3 = node(&store).await;
+    let file_id = file(&store, 2).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+
+    let old_low = Uuid::new_v4();
+    store
+        .create_replication_task(old_low, chunk_id, Some(n1), n2, 5, 0)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE replication_tasks SET created_at = now() - INTERVAL '180 seconds' WHERE task_id=$1",
+    )
+    .bind(old_low)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let fresh_high = Uuid::new_v4();
+    store
+        .create_replication_task(fresh_high, chunk_id, Some(n1), n3, 5, 1)
+        .await
+        .unwrap();
+
+    let epoch = become_leader(&store).await;
+    let claimed = store
+        .claim_replication_task(epoch, 60)
+        .await
+        .unwrap()
+        .expect("pending task is claimed");
+    assert_eq!(
+        claimed.task_id, old_low,
+        "an aged low-priority task outranks a fresh high-priority task"
+    );
 }
 
 #[tokio::test]
@@ -552,13 +662,20 @@ async fn leadership_lease_allows_one_coordinator_and_expires() {
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
 
-    assert!(store.try_acquire_leadership(first, 15_000).await.unwrap());
-    assert!(
+    let first_epoch = store
+        .try_acquire_leadership(first, 15_000)
+        .await
+        .unwrap()
+        .expect("first leader acquires the lease");
+    assert_eq!(first_epoch, 1);
+    assert_eq!(
         store.try_acquire_leadership(first, 15_000).await.unwrap(),
-        "the leader renews its own lease"
+        Some(first_epoch),
+        "the leader renews its own lease without changing the epoch"
     );
-    assert!(
-        !store.try_acquire_leadership(second, 15_000).await.unwrap(),
+    assert_eq!(
+        store.try_acquire_leadership(second, 15_000).await.unwrap(),
+        None,
         "a standby cannot take an unexpired lease"
     );
 
@@ -567,9 +684,61 @@ async fn leadership_lease_allows_one_coordinator_and_expires() {
         .await
         .unwrap();
 
-    assert!(
-        store.try_acquire_leadership(second, 15_000).await.unwrap(),
-        "a standby takes over an expired lease"
+    let second_epoch = store
+        .try_acquire_leadership(second, 15_000)
+        .await
+        .unwrap()
+        .expect("a standby takes over an expired lease");
+    assert_eq!(second_epoch, first_epoch + 1);
+    assert_eq!(
+        store.try_acquire_leadership(first, 15_000).await.unwrap(),
+        None
     );
-    assert!(!store.try_acquire_leadership(first, 15_000).await.unwrap());
+
+    let n1 = node(&store).await;
+    let n2 = node(&store).await;
+    let file_id = file(&store, 1).await;
+    let chunk_id = Uuid::new_v4();
+    insert_chunk(&store, file_id, chunk_id, &[n1]).await;
+    let task_id = Uuid::new_v4();
+    store
+        .create_replication_task(task_id, chunk_id, Some(n1), n2, 5, 1)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_replication_task(first_epoch, 0)
+            .await
+            .unwrap()
+            .is_none(),
+        "a stale epoch cannot claim pending work"
+    );
+    store
+        .claim_replication_task(second_epoch, 0)
+        .await
+        .unwrap()
+        .expect("new leader claims the task");
+
+    assert!(
+        !store
+            .mark_task_failed_fenced(task_id, 1, first_epoch)
+            .await
+            .unwrap(),
+        "a stale epoch cannot fail the task"
+    );
+    assert!(
+        !store
+            .complete_replication_task_fenced(task_id, chunk_id, Some(n1), n2, first, first_epoch)
+            .await
+            .unwrap(),
+        "a stale leader cannot publish a replica"
+    );
+    assert!(
+        store
+            .complete_replication_task_fenced(task_id, chunk_id, Some(n1), n2, second, second_epoch)
+            .await
+            .unwrap(),
+        "the current leader completes the task"
+    );
+    assert_eq!(store.durable_replica_count(chunk_id).await.unwrap(), 2);
 }

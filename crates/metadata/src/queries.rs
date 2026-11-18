@@ -124,28 +124,38 @@ impl MetadataStore {
 
     /// Try to acquire or renew the coordinator leadership lease.
     ///
-    /// Returns `true` when `leader_id` holds the lease after this call. A
-    /// different coordinator may take over only after the previous lease
-    /// expires, so at most one coordinator runs background work at a time.
-    pub async fn try_acquire_leadership(&self, leader_id: Uuid, ttl_ms: i64) -> sqlx::Result<bool> {
-        let row: Option<(Uuid,)> = sqlx::query_as(
+    /// Returns the current epoch when `leader_id` holds the lease after this
+    /// call. The epoch increases whenever a different coordinator takes over,
+    /// so stale leaders can be fenced out of recovery writes. Renewal by the
+    /// same leader keeps the epoch stable.
+    pub async fn try_acquire_leadership(
+        &self,
+        leader_id: Uuid,
+        ttl_ms: i64,
+    ) -> sqlx::Result<Option<i64>> {
+        let row: Option<(Uuid, i64)> = sqlx::query_as(
             r#"
-            INSERT INTO coordinator_leader (singleton, leader_id, lease_expiry, updated_at)
-            VALUES (TRUE, $1, now() + ($2 * INTERVAL '1 millisecond'), now())
+            INSERT INTO coordinator_leader (singleton, leader_id, lease_expiry, epoch, updated_at)
+            VALUES (TRUE, $1, now() + ($2 * INTERVAL '1 millisecond'), 1, now())
             ON CONFLICT (singleton) DO UPDATE SET
               leader_id = EXCLUDED.leader_id,
               lease_expiry = EXCLUDED.lease_expiry,
+              epoch = CASE
+                WHEN coordinator_leader.leader_id = EXCLUDED.leader_id
+                  THEN coordinator_leader.epoch
+                ELSE coordinator_leader.epoch + 1
+              END,
               updated_at = now()
             WHERE coordinator_leader.leader_id = EXCLUDED.leader_id
                OR coordinator_leader.lease_expiry <= now()
-            RETURNING leader_id
+            RETURNING leader_id, epoch
             "#,
         )
         .bind(leader_id)
         .bind(ttl_ms)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.is_some_and(|(id,)| id == leader_id))
+        Ok(row.and_then(|(id, epoch)| (id == leader_id).then_some(epoch)))
     }
 
     // ---- nodes -----------------------------------------------------------
@@ -311,25 +321,49 @@ impl MetadataStore {
         Ok(rows)
     }
 
-    /// Atomically claim a pending replication task: mark it in_progress and
-    /// return the task row. Returns None if no pending tasks available.
-    pub async fn claim_replication_task(&self) -> sqlx::Result<Option<ReplicationTaskRow>> {
+    /// Atomically claim a pending replication task for `epoch`.
+    ///
+    /// The claimed row records the leader epoch. `aging_secs` adds one
+    /// effective priority point per full interval a task waits, so low-priority
+    /// work eventually runs instead of starving behind a continuous stream of
+    /// high-priority repairs. Returns None if no pending tasks are available.
+    pub async fn claim_replication_task(
+        &self,
+        epoch: i64,
+        aging_secs: i64,
+    ) -> sqlx::Result<Option<ReplicationTaskRow>> {
         let mut tx = self.pool.begin().await?;
 
         let row: Option<ReplicationTaskRow> = sqlx::query_as(
             r#"
             UPDATE replication_tasks
-            SET status='in_progress', updated_at=now()
+            SET status='in_progress', claimed_epoch=$1, updated_at=now()
             WHERE task_id = (
                 SELECT task_id FROM replication_tasks
                 WHERE status='pending'
-                ORDER BY priority DESC, created_at ASC
+                  AND EXISTS (
+                    SELECT 1 FROM coordinator_leader
+                    WHERE singleton=TRUE
+                      AND epoch=$1
+                      AND lease_expiry > now()
+                  )
+                ORDER BY (
+                    priority + CASE
+                        WHEN $2 > 0 THEN LEAST(
+                            1000,
+                            FLOOR(EXTRACT(EPOCH FROM (now() - created_at)) / $2)::int
+                        )
+                        ELSE 0
+                    END
+                ) DESC, created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING *
             "#,
         )
+        .bind(epoch)
+        .bind(aging_secs)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -352,6 +386,51 @@ impl MetadataStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Fail a task only if this epoch still owns the claim. A stale leader's
+    /// failure cannot reopen or overwrite work claimed by the new leader.
+    pub async fn mark_task_failed_fenced(
+        &self,
+        task_id: Uuid,
+        attempts: i32,
+        epoch: i64,
+    ) -> sqlx::Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE replication_tasks
+            SET status = CASE WHEN $1 >= max_attempts THEN 'failed' ELSE 'pending' END,
+                attempts = $1,
+                updated_at = now()
+            WHERE task_id = $2
+              AND status='in_progress'
+              AND claimed_epoch=$3
+            "#,
+        )
+        .bind(attempts)
+        .bind(task_id)
+        .bind(epoch)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Fail tasks claimed by an older leadership epoch (or before epochs were
+    /// recorded). A new leader calls this on takeover so it does not wait for
+    /// the generic stale-task timeout before re-enqueueing abandoned repairs.
+    pub async fn fail_replication_tasks_claimed_before(&self, epoch: i64) -> sqlx::Result<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE replication_tasks
+            SET status='failed', attempts=max_attempts, updated_at=now()
+            WHERE status='in_progress'
+              AND (claimed_epoch IS NULL OR claimed_epoch < $1)
+            "#,
+        )
+        .bind(epoch)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Mark abandoned `in_progress` tasks as failed. A coordinator that
@@ -793,5 +872,82 @@ impl MetadataStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Record a durable replica and complete the task atomically, but only if
+    /// `leader_id` still holds the lease at `epoch` and still owns the claim.
+    ///
+    /// A leader that was fenced after sending bytes to a target cannot publish
+    /// the replica row or mark the task done. The target's bytes become an
+    /// unreferenced chunk for orphan GC instead of corrupting metadata.
+    pub async fn complete_replication_task_fenced(
+        &self,
+        task_id: Uuid,
+        chunk_id: Uuid,
+        source_node_id: Option<Uuid>,
+        target_node_id: Uuid,
+        leader_id: Uuid,
+        epoch: i64,
+    ) -> sqlx::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        let still_leader: Option<(i32,)> = sqlx::query_as(
+            r#"
+            SELECT 1
+            FROM coordinator_leader
+            WHERE singleton=TRUE
+              AND leader_id=$1
+              AND epoch=$2
+              AND lease_expiry > now()
+            "#,
+        )
+        .bind(leader_id)
+        .bind(epoch)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if still_leader.is_none() {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO chunk_replicas (chunk_id, node_id, durable)
+            VALUES ($1,$2,true)
+            ON CONFLICT (chunk_id, node_id) DO UPDATE
+              SET durable = chunk_replicas.durable OR EXCLUDED.durable
+            "#,
+        )
+        .bind(chunk_id)
+        .bind(target_node_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE replication_tasks
+            SET status='done',
+                source_node_id=$2,
+                target_node_id=$3,
+                updated_at=now()
+            WHERE task_id=$1
+              AND status='in_progress'
+              AND claimed_epoch=$4
+            "#,
+        )
+        .bind(task_id)
+        .bind(source_node_id)
+        .bind(target_node_id)
+        .bind(epoch)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        tx.commit().await?;
+        Ok(true)
     }
 }
