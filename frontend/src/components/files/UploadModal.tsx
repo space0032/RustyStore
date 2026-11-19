@@ -65,7 +65,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       });
       onSuccess(selectedFile.name);
     } catch (err) {
-      onError((err as Error).message || 'Upload failed');
+      const e = err as Error & { retryAfter?: number };
+      const retryMsg = e.retryAfter ? ` Please retry after ${e.retryAfter}s.` : '';
+      onError(`${e.message || 'Upload failed'}${retryMsg}`);
     } finally {
       setIsUploading(false);
       onClose();

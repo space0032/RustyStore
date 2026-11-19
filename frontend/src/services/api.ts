@@ -497,15 +497,18 @@ export async function fetchFileBlobUrl(fileId: string): Promise<string> {
   return window.URL.createObjectURL(blob);
 }
 
+// Keep pristine copies of demo data so reset can restore without a page reload.
+const INITIAL_MOCK_FILES = MOCK_FILES.map((f) => ({ ...f }));
+const INITIAL_MOCK_FILE_DETAILS: Record<string, FileInfo> = JSON.parse(JSON.stringify(MOCK_FILE_DETAILS));
+
 /** Reset demo mock data to initial state. */
 export function resetDemoData(): void {
-  // Re-import the original mock data by clearing our runtime mutations.
-  // Since MOCK_FILES and MOCK_FILE_DETAILS are const, we can't reassign them,
-  // but we can clear and repopulate. For simplicity in demo mode, just reload the page.
-  // A more sophisticated version would deep-clone the original data on module load.
-  if (typeof window !== 'undefined') {
-    window.location.reload();
+  MOCK_FILES.length = 0;
+  MOCK_FILES.push(...INITIAL_MOCK_FILES.map((f) => ({ ...f })));
+  for (const key of Object.keys(MOCK_FILE_DETAILS)) {
+    delete MOCK_FILE_DETAILS[key];
   }
+  Object.assign(MOCK_FILE_DETAILS, JSON.parse(JSON.stringify(INITIAL_MOCK_FILE_DETAILS)));
 }
 
 export interface ConnectionTestResult {

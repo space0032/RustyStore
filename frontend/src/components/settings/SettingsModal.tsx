@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { X, Sliders, Key, Server, RefreshCw, Sparkles } from 'lucide-react';
-import { AppSettings, ConnectionTestResult, testConnection } from '../../services/api';
+import { X, Sliders, Key, Server, RefreshCw, Sparkles, RotateCcw } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { AppSettings, ConnectionTestResult, testConnection, resetDemoData } from '../../services/api';
 import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
 
 interface SettingsModalProps {
@@ -16,6 +17,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   settings,
   onSave,
 }) => {
+  const queryClient = useQueryClient();
   const [form, setForm] = useState<AppSettings>({ ...settings });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
@@ -74,25 +76,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
           {/* Demo Mode Toggle */}
-          <div className="flex items-center justify-between p-4 rounded-xl bg-slate-800/60 border border-slate-700/60">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-amber-500/10 text-amber-400 rounded-lg">
-                <Sparkles className="w-5 h-5" />
+          <div className="p-4 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-amber-500/10 text-amber-400 rounded-lg">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-sm font-medium text-slate-200">Demo / Mock Mode</span>
+                  <p className="text-xs text-slate-400">Explore console with synthetic cluster data</p>
+                </div>
               </div>
-              <div>
-                <span className="text-sm font-medium text-slate-200">Demo / Mock Mode</span>
-                <p className="text-xs text-slate-400">Explore console with synthetic cluster data</p>
-              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.demoMode}
+                  onChange={(e) => setForm({ ...form, demoMode: e.target.checked })}
+                  className="sr-only peer"
+                  aria-label="Toggle demo mode"
+                />
+                <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rust-500"></div>
+              </label>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.demoMode}
-                onChange={(e) => setForm({ ...form, demoMode: e.target.checked })}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rust-500"></div>
-            </label>
+            {form.demoMode && (
+              <button
+                type="button"
+                onClick={() => {
+                  resetDemoData();
+                  void queryClient.invalidateQueries();
+                  setTestResult({ ok: true, message: 'Demo data has been reset to its initial state.' });
+                }}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-medium text-slate-200 transition-colors w-full justify-center"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset Demo Data
+              </button>
+            )}
           </div>
 
           {/* Gateway Endpoint */}

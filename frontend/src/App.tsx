@@ -32,26 +32,57 @@ interface EndpointError {
   message: string;
   status?: number;
   requestId?: string;
+  retryAfter?: number;
 }
 
 function toEndpointError(label: string, error: unknown): EndpointError {
-  const err = error as { message?: string; status?: number; requestId?: string } | null;
+  const err = error as { message?: string; status?: number; requestId?: string; retryAfter?: number } | null;
   return {
     label,
     message: err?.message ?? 'Unknown error',
     status: err?.status,
     requestId: err?.requestId,
+    retryAfter: err?.retryAfter,
   };
+}
+
+function getTabFromUrl(): ActiveTab {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    if (tab === 'chunks' || tab === 'cluster' || tab === 'metrics') return tab;
+  } catch {
+    // ignore
+  }
+  return 'files';
 }
 
 export function App() {
   const queryClient = useQueryClient();
   const [settings, setSettings] = useState<AppSettings>(loadSettings());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<ActiveTab>('files');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(getTabFromUrl);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [detailsFile, setDetailsFile] = useState<FileSummary | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (activeTab === 'files') {
+      params.delete('tab');
+    } else {
+      params.set('tab', activeTab);
+    }
+    const qs = params.toString();
+    const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+    window.history.replaceState(null, '', url);
+  }, [activeTab]);
+
+  React.useEffect(() => {
+    const onPopState = () => setActiveTab(getTabFromUrl());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const pollInterval = settings.pollIntervalMs > 0 ? settings.pollIntervalMs : false;
 
@@ -110,7 +141,15 @@ export function App() {
   const authError = endpointErrors.find((e) => e.status === 401 || e.status === 403);
 
   const handleRefresh = useCallback(() => {
-    void queryClient.invalidateQueries();
+    // Manual refresh: refetch active queries without discarding loaded file pages.
+    void queryClient.refetchQueries({ type: 'active' });
+  }, [queryClient]);
+
+  const handleFilesChanged = useCallback(() => {
+    // After upload/delete, reset file list so changes (and new ordering/cursors) are consistent.
+    void queryClient.resetQueries({ queryKey: ['files'] });
+    void queryClient.invalidateQueries({ queryKey: ['stats'] });
+    void queryClient.invalidateQueries({ queryKey: ['nodes'] });
   }, [queryClient]);
 
   const notify = useCallback((type: ToastType, title: string, message?: string) => {
@@ -128,7 +167,8 @@ export function App() {
   const handleSaveSettings = (newSettings: AppSettings) => {
     setSettings(newSettings);
     saveSettings(newSettings);
-    void queryClient.invalidateQueries();
+    // Settings changes (URL, auth, demo mode) can fundamentally change data; reset pagination.
+    void queryClient.resetQueries();
     notify('success', 'Settings Saved', 'Connection parameters have been updated.');
   };
 
@@ -136,7 +176,7 @@ export function App() {
     const updated = { ...settings, demoMode: !settings.demoMode };
     setSettings(updated);
     saveSettings(updated);
-    void queryClient.invalidateQueries();
+    void queryClient.resetQueries();
     notify(
       'info',
       updated.demoMode ? 'Demo Mode Enabled' : 'Demo Mode Disabled',
@@ -158,7 +198,9 @@ export function App() {
       await downloadFile(file.file_id, file.filename);
       notify('success', 'Download Complete', `${file.filename} verified with SHA-256.`);
     } catch (err) {
-      notify('error', 'Download Failed', (err as Error).message);
+      const e = err as Error & { retryAfter?: number };
+      const retryMsg = e.retryAfter ? ` Retry after ${e.retryAfter}s.` : '';
+      notify('error', 'Download Failed', `${e.message}${retryMsg}`);
     }
   };
 
@@ -206,6 +248,9 @@ export function App() {
                   <div className="min-w-0">
                     <span className="font-semibold text-amber-300">{err.label}: </span>
                     <span className="text-amber-100/80">{err.message}</span>
+                    {err.retryAfter != null && (
+                      <span className="ml-2 text-amber-200/80">Retry after {err.retryAfter}s.</span>
+                    )}
                     {err.requestId && (
                       <span className="ml-2 font-mono text-[10px] text-amber-200/60">
                         request {err.requestId}
@@ -227,7 +272,7 @@ export function App() {
             <FilesView
               files={files}
               loading={filesQuery.isPending}
-              onRefresh={handleRefresh}
+              onRefresh={handleFilesChanged}
               nextCursor={filesQuery.data?.pages[filesQuery.data.pages.length - 1]?.next_cursor}
               onLoadMore={
                 filesQuery.hasNextPage ? () => void filesQuery.fetchNextPage() : undefined
