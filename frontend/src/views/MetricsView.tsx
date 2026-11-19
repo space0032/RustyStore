@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   ArrowUpRight,
@@ -6,7 +6,6 @@ import {
   AlertOctagon,
   AlertTriangle,
   Server,
-  Layers,
   Copy,
   Check,
   Code,
@@ -19,9 +18,22 @@ import {
   YAxis,
   Tooltip,
   CartesianGrid,
+  LineChart,
+  Line,
+  Legend,
 } from 'recharts';
 import { ParsedPrometheusMetrics } from '../types/api';
 import { formatBytes } from '../utils/formatters';
+
+interface MetricSample {
+  t: number;
+  label: string;
+  uploaded: number;
+  downloaded: number;
+  failures: number;
+  nodes: number;
+  underReplicated: number;
+}
 
 interface MetricsViewProps {
   metrics: ParsedPrometheusMetrics | null;
@@ -37,6 +49,36 @@ export const MetricsView: React.FC<MetricsViewProps> = ({
 }) => {
   const [copiedRaw, setCopiedRaw] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
+  const [history, setHistory] = useState<MetricSample[]>([]);
+
+  useEffect(() => {
+    if (!metrics || !metrics.available) return;
+    const now = Date.now();
+    const sample: MetricSample = {
+      t: now,
+      label: new Date(now).toLocaleTimeString(),
+      uploaded: metrics.uploadedBytesTotal || 0,
+      downloaded: metrics.downloadedBytesTotal || 0,
+      failures: metrics.uploadFailuresTotal || 0,
+      nodes: metrics.activeStorageNodes || 0,
+      underReplicated: metrics.underReplicatedChunks || 0,
+    };
+    setHistory((prev) => {
+      const last = prev[prev.length - 1];
+      if (
+        last &&
+        last.uploaded === sample.uploaded &&
+        last.downloaded === sample.downloaded &&
+        last.failures === sample.failures &&
+        last.nodes === sample.nodes &&
+        last.underReplicated === sample.underReplicated
+      ) {
+        return prev; // avoid duplicate identical samples
+      }
+      const next = [...prev, sample];
+      return next.slice(-30);
+    });
+  }, [metrics]);
 
   const handleCopyRaw = () => {
     if (!metrics?.rawText) return;
@@ -58,6 +100,17 @@ export const MetricsView: React.FC<MetricsViewProps> = ({
       formatted: formatBytes(metrics?.downloadedBytesTotal || 0),
     },
   ];
+
+  const historyWithDeltas = useMemo(() => {
+    return history.map((s, i) => {
+      const prev = i > 0 ? history[i - 1] : null;
+      return {
+        ...s,
+        uploadedDelta: prev ? Math.max(0, s.uploaded - prev.uploaded) : 0,
+        downloadedDelta: prev ? Math.max(0, s.downloaded - prev.downloaded) : 0,
+      };
+    });
+  }, [history]);
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-auto bg-slate-950 p-6 space-y-6">
@@ -202,6 +255,68 @@ export const MetricsView: React.FC<MetricsViewProps> = ({
             </BarChart>
           </ResponsiveContainer>
         </div>
+      </div>
+
+      {/* Sample History */}
+      <div className="p-6 rounded-2xl bg-slate-900/60 border border-slate-800/80 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-sky-400" />
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-300">
+              Recent Telemetry Samples
+            </h3>
+          </div>
+          <span className="text-xs text-slate-500">
+            {history.length > 1
+              ? `Last ${history.length} samples (client-side)`
+              : 'Collecting samples over time...'}
+          </span>
+        </div>
+
+        {historyWithDeltas.length > 1 ? (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="h-56 w-full">
+              <div className="text-[11px] text-slate-400 mb-2">Bytes transferred per sample interval (delta)</div>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={historyWithDeltas} margin={{ top: 10, right: 20, left: 10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                  <XAxis dataKey="label" stroke="#64748b" tick={{ fontSize: 10 }} minTickGap={20} />
+                  <YAxis stroke="#64748b" tick={{ fontSize: 10 }} tickFormatter={(v) => formatBytes(Number(v))} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '12px', color: '#f8fafc', fontSize: '12px' }}
+                    formatter={(value: any, name: string) => [formatBytes(Number(value)), name === 'uploadedDelta' ? 'Uploaded Δ' : 'Downloaded Δ']}
+                  />
+                  <Legend />
+                  <Line type="monotone" dataKey="uploadedDelta" name="Uploaded Δ" stroke="#e05a47" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="downloadedDelta" name="Downloaded Δ" stroke="#34d399" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="h-56 w-full">
+              <div className="text-[11px] text-slate-400 mb-2">Nodes, failures, and under-replicated chunks</div>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={historyWithDeltas} margin={{ top: 10, right: 20, left: 10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                  <XAxis dataKey="label" stroke="#64748b" tick={{ fontSize: 10 }} minTickGap={20} />
+                  <YAxis stroke="#64748b" tick={{ fontSize: 10 }} allowDecimals={false} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '12px', color: '#f8fafc', fontSize: '12px' }}
+                  />
+                  <Legend />
+                  <Line type="stepAfter" dataKey="nodes" name="Active nodes" stroke="#38bdf8" strokeWidth={2} dot={false} />
+                  <Line type="stepAfter" dataKey="failures" name="Upload failures" stroke="#fb7185" strokeWidth={2} dot={false} />
+                  <Line type="stepAfter" dataKey="underReplicated" name="Under-replicated" stroke="#fbbf24" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        ) : (
+          <div className="h-32 flex items-center justify-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl">
+            {metrics?.available === false
+              ? 'History unavailable while live metrics are unreachable.'
+              : 'Waiting for additional samples to render trends...'}
+          </div>
+        )}
       </div>
 
       {/* Raw Prometheus Output Modal / Section */}

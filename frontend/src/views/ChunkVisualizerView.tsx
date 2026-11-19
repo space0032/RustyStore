@@ -33,10 +33,9 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [activeChunkIndex, setActiveChunkIndex] = useState<number>(0);
 
-  // Ignore a selected id that no longer exists (e.g. the file was deleted).
-  const activeId = files.some((f) => f.file_id === selectedFileId)
-    ? selectedFileId
-    : (files[0]?.file_id ?? null);
+  // Prefer explicit selection (including deep links not yet in loaded pages).
+  const activeId = selectedFileId ?? files[0]?.file_id ?? null;
+  const selectedInLoaded = activeId ? files.some((f) => f.file_id === activeId) : false;
 
   useEffect(() => {
     if (!activeId) {
@@ -99,6 +98,11 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
             className="px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-rust-500 transition-colors max-w-xs"
             aria-label="Select file to visualize"
           >
+            {activeId && !selectedInLoaded && (
+              <option value={activeId}>
+                {fileDetails?.file_id === activeId ? `${fileDetails.filename} (${formatBytes(fileDetails.total_size)})` : `Selected object (${truncateUuid(activeId)})`}
+              </option>
+            )}
             {files.map((f) => (
               <option key={f.file_id} value={f.file_id}>
                 {f.filename} ({formatBytes(f.total_size)})
@@ -304,12 +308,14 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
             <Layers className="w-8 h-8" />
           </div>
           <span className="text-sm font-semibold text-slate-300">
-            {files.length === 0 ? 'No objects to visualize' : 'No file selected'}
+            {activeId ? 'Unable to load chunk manifest' : files.length === 0 ? 'No objects to visualize' : 'No file selected'}
           </span>
           <p className="text-xs text-slate-500 max-w-sm text-center">
-            {files.length === 0
-              ? 'Upload a file to inspect its chunk manifest and replica placement.'
-              : 'Select an object from the dropdown to view its distributed chunk layout.'}
+            {activeId
+              ? 'The selected object could not be loaded. It may have been deleted or is not accessible.'
+              : files.length === 0
+                ? 'Upload a file to inspect its chunk manifest and replica placement.'
+                : 'Select an object from the dropdown to view its distributed chunk layout.'}
           </p>
         </div>
       )}
