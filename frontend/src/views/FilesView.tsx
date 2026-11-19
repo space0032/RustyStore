@@ -228,6 +228,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
                           onClick={() => onInspectChunks(file.file_id)}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-rust-400 hover:bg-slate-800 transition-colors"
                           title="Inspect Chunks & Replicas"
+                          aria-label={`Inspect chunks for ${file.filename}`}
                         >
                           <Layers className="w-3.5 h-3.5" />
                         </button>
@@ -235,6 +236,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
                           onClick={() => onDownloadFile(file)}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800 transition-colors"
                           title="Stream Download"
+                          aria-label={`Download ${file.filename}`}
                         >
                           <Download className="w-3.5 h-3.5" />
                         </button>
@@ -242,6 +244,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
                           onClick={() => setDeleteTarget(file)}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
                           title="Delete Object"
+                          aria-label={`Delete ${file.filename}`}
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -257,12 +260,18 @@ export const FilesView: React.FC<FilesViewProps> = ({
                         <Database className="w-6 h-6" />
                       </div>
                       <span className="text-sm font-semibold text-slate-300">
-                        {loading ? 'Loading files...' : 'No objects found'}
+                        {loading
+                          ? 'Loading files...'
+                          : searchTerm
+                            ? 'No matching objects'
+                            : 'No objects found'}
                       </span>
                       <p className="text-xs text-slate-500 max-w-sm">
                         {loading
                           ? 'Communicating with RustyStore Coordinator...'
-                          : 'Upload a file to begin chunking and distributing data across nodes.'}
+                          : searchTerm
+                            ? `No files match "${searchTerm}". Try a different search term.`
+                            : 'Upload a file to begin chunking and distributing data across nodes.'}
                       </p>
                     </div>
                   </td>
@@ -276,7 +285,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
         <div className="p-3 border-t border-slate-800 bg-slate-900/80 flex items-center justify-between text-xs text-slate-400">
           <div>
             Showing <span className="font-semibold text-slate-200">{filteredFiles.length}</span>{' '}
-            of <span className="font-semibold text-slate-200">{files.length}</span> committed file(s)
+            of <span className="font-semibold text-slate-200">{files.length}</span> loaded file(s)
+            {searchTerm && <span> (filtered by "{searchTerm}")</span>}
           </div>
           {nextCursor && onLoadMore && (
             <button
@@ -284,7 +294,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
               disabled={loadingMore}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition-colors disabled:opacity-50"
             >
-              <span>{loadingMore ? 'Loading...' : 'Next Page (Cursor)'}</span>
+              <span>{loadingMore ? 'Loading...' : 'Load More'}</span>
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           )}

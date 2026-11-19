@@ -97,6 +97,7 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
             value={activeId || ''}
             onChange={(e) => onSelectFileId(e.target.value)}
             className="px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-rust-500 transition-colors max-w-xs"
+            aria-label="Select file to visualize"
           >
             {files.map((f) => (
               <option key={f.file_id} value={f.file_id}>
@@ -298,8 +299,18 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
           </div>
         </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center text-slate-500 text-sm">
-          No files available to visualize. Upload an object first!
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-slate-400">
+          <div className="p-4 bg-slate-800/60 rounded-full text-slate-500">
+            <Layers className="w-8 h-8" />
+          </div>
+          <span className="text-sm font-semibold text-slate-300">
+            {files.length === 0 ? 'No objects to visualize' : 'No file selected'}
+          </span>
+          <p className="text-xs text-slate-500 max-w-sm text-center">
+            {files.length === 0
+              ? 'Upload a file to inspect its chunk manifest and replica placement.'
+              : 'Select an object from the dropdown to view its distributed chunk layout.'}
+          </p>
         </div>
       )}
     </div>
