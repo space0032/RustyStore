@@ -29,6 +29,7 @@ interface FilesViewProps {
   onRefresh: () => void;
   nextCursor?: string;
   onLoadMore?: () => void;
+  onLoadAll?: () => Promise<void> | void;
   loadingMore?: boolean;
   onViewDetails: (file: FileSummary) => void;
   onInspectChunks: (fileId: string) => void;
@@ -42,12 +43,14 @@ export const FilesView: React.FC<FilesViewProps> = ({
   onRefresh,
   nextCursor,
   onLoadMore,
+  onLoadAll,
   loadingMore = false,
   onViewDetails,
   onInspectChunks,
   onDownloadFile,
   onNotify,
 }) => {
+  const [loadingAll, setLoadingAll] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [sortField, setSortField] = useState<'filename' | 'total_size' | 'created_epoch_ms'>('created_epoch_ms');
   const [sortAsc, setSortAsc] = useState(false);
@@ -192,13 +195,15 @@ export const FilesView: React.FC<FilesViewProps> = ({
                           {getFileIcon(file.filename)}
                         </div>
                         <div className="min-w-0">
-                          <span
-                            className="font-medium text-slate-200 hover:text-rust-400 cursor-pointer truncate block"
+                          <button
+                            type="button"
+                            className="font-medium text-slate-200 hover:text-rust-400 cursor-pointer truncate block max-w-full text-left focus:outline-none focus:underline"
                             onClick={() => setPreviewFile(file)}
+                            title={`Preview ${file.filename}`}
                           >
                             {file.filename}
-                          </span>
-                          <span className="font-mono text-[10px] text-slate-500">
+                          </button>
+                          <span className="font-mono text-[10px] text-slate-500 block">
                             ID: {truncateUuid(file.file_id)}
                           </span>
                         </div>
@@ -304,26 +309,33 @@ export const FilesView: React.FC<FilesViewProps> = ({
               of <span className="font-semibold text-slate-200">{files.length}</span> loaded file(s)
               {searchTerm && <span> (filtered by "{searchTerm}")</span>}
             </div>
-            {searchTerm && nextCursor && onLoadMore && (
+            {searchTerm && nextCursor && (onLoadMore || onLoadAll) && (
               <div className="text-[11px] text-amber-300/80">
-                Search applies to loaded files only. Load more to include older objects.
+                Search applies to loaded files only. Load more (or load all) to include older objects.
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            {searchTerm && nextCursor && onLoadMore && (
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {searchTerm && nextCursor && onLoadAll && (
               <button
-                onClick={onLoadMore}
-                disabled={loadingMore}
+                onClick={async () => {
+                  try {
+                    setLoadingAll(true);
+                    await onLoadAll();
+                  } finally {
+                    setLoadingAll(false);
+                  }
+                }}
+                disabled={loadingMore || loadingAll}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-200 font-medium transition-colors disabled:opacity-50"
               >
-                <span>{loadingMore ? 'Loading...' : 'Load more to search'}</span>
+                <span>{loadingAll ? 'Loading all...' : 'Load all to search'}</span>
               </button>
             )}
             {nextCursor && onLoadMore && (
               <button
                 onClick={onLoadMore}
-                disabled={loadingMore}
+                disabled={loadingMore || loadingAll}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition-colors disabled:opacity-50"
               >
                 <span>{loadingMore ? 'Loading...' : 'Load More'}</span>

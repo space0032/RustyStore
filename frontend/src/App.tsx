@@ -192,6 +192,14 @@ export function App() {
     void queryClient.invalidateQueries({ queryKey: ['nodes'] });
   }, [queryClient]);
 
+  const handleLoadAllFiles = useCallback(async () => {
+    // Best-effort: keep fetching while more pages are available.
+    for (let i = 0; i < 200; i++) {
+      const res = await filesQuery.fetchNextPage();
+      if (!res.hasNextPage) break;
+    }
+  }, [filesQuery]);
+
   const notify = useCallback((type: ToastType, title: string, message?: string) => {
     const id = nextId('toast');
     setToasts((prev) => [...prev, { id, type, title, message }]);
@@ -317,6 +325,7 @@ export function App() {
               onLoadMore={
                 filesQuery.hasNextPage ? () => void filesQuery.fetchNextPage() : undefined
               }
+              onLoadAll={filesQuery.hasNextPage ? handleLoadAllFiles : undefined}
               loadingMore={filesQuery.isFetchingNextPage}
               onViewDetails={(file) => setDetailsFileId(file.file_id)}
               onInspectChunks={handleInspectChunks}
