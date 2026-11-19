@@ -279,18 +279,39 @@ export function downloadFile(fileId: string, filename: string): Promise<void> {
   });
 }
 
+export interface UploadHandle {
+  promise: Promise<UploadResponse>;
+  abort: () => void;
+}
+
 export function uploadFileWithProgress(
   file: File,
   chunkSize = 4194304,
-  onProgress?: (progress: UploadProgress) => void
-): Promise<UploadResponse> {
+  onProgress?: (progress: UploadProgress) => void,
+  signal?: { aborted?: boolean; onAbort?: () => void }
+): UploadHandle {
   const settings = loadSettings();
   if (settings.demoMode) {
-    return new Promise((resolve) => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
+    const abort = () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+    };
+    if (signal) {
+      signal.onAbort = abort;
+      if (signal.aborted) abort();
+    }
+    const promise = new Promise<UploadResponse>((resolve, reject) => {
       let uploaded = 0;
       const total = file.size;
       const totalChunks = Math.max(1, Math.ceil(total / chunkSize));
-      const interval = setInterval(() => {
+      interval = setInterval(() => {
+        if (cancelled) {
+          if (interval) clearInterval(interval);
+          reject(new ApiError('Upload cancelled', 0, 'cancelled'));
+          return;
+        }
         if (total > 0) uploaded += Math.min(total / 10, total - uploaded);
         const pct = total === 0 ? 100 : Math.min(100, Math.round((uploaded / total) * 100));
         const currentChunk = Math.min(
@@ -306,7 +327,7 @@ export function uploadFileWithProgress(
         });
 
         if (uploaded >= total) {
-          clearInterval(interval);
+          if (interval) clearInterval(interval);
           const newFile: FileSummary = {
             file_id: nextId('demo-file'),
             filename: file.name,
@@ -316,8 +337,6 @@ export function uploadFileWithProgress(
             status: 'committed',
             created_epoch_ms: Date.now(),
           };
-          // Demo mode: don't permanently mutate the original mock array.
-          // The React Query cache will be invalidated after upload, refetching from the (now updated) mock.
           MOCK_FILES.unshift(newFile);
           resolve({
             file_id: newFile.file_id,
@@ -329,10 +348,26 @@ export function uploadFileWithProgress(
         }
       }, 150);
     });
+    return { promise, abort };
   }
 
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
+  const xhr = new XMLHttpRequest();
+  let settled = false;
+  const abort = () => {
+    if (!settled) {
+      try {
+        xhr.abort();
+      } catch {
+        // ignore
+      }
+    }
+  };
+  if (signal) {
+    signal.onAbort = abort;
+    if (signal.aborted) abort();
+  }
+
+  const promise = new Promise<UploadResponse>((resolve, reject) => {
     const url = buildUrl('/api/v1/files');
     xhr.open('POST', url, true);
     xhr.timeout = 30000;
@@ -363,6 +398,7 @@ export function uploadFileWithProgress(
     };
 
     xhr.onload = () => {
+      settled = true;
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const res = JSON.parse(xhr.responseText) as UploadResponse;
@@ -377,10 +413,22 @@ export function uploadFileWithProgress(
       }
     };
 
-    xhr.onerror = () => reject(new ApiError('Network error during upload', 0));
-    xhr.ontimeout = () => reject(new ApiError('Upload timed out', 0));
+    xhr.onerror = () => {
+      settled = true;
+      reject(new ApiError('Network error during upload', 0));
+    };
+    xhr.ontimeout = () => {
+      settled = true;
+      reject(new ApiError('Upload timed out', 0));
+    };
+    xhr.onabort = () => {
+      settled = true;
+      reject(new ApiError('Upload cancelled', 0, 'cancelled'));
+    };
     xhr.send(file);
   });
+
+  return { promise, abort };
 }
 
 export async function listNodes(): Promise<NodeInfo[]> {
