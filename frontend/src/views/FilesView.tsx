@@ -54,6 +54,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [sortField, setSortField] = useState<'filename' | 'total_size' | 'created_epoch_ms'>('created_epoch_ms');
   const [sortAsc, setSortAsc] = useState(false);
+  const [uploadHadSuccess, setUploadHadSuccess] = useState(false);
 
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
