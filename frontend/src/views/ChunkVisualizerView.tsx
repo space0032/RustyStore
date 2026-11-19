@@ -62,7 +62,7 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
     return () => {
       active = false;
     };
-  }, [activeId, onNotify]);
+  }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps -- onNotify is a stable-enough toast helper; avoid refetch loops if its identity changes.
 
   const handleCopyHash = (hash: string) => {
     navigator.clipboard.writeText(hash);

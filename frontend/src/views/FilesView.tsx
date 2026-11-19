@@ -132,7 +132,10 @@ export const FilesView: React.FC<FilesViewProps> = ({
           </div>
 
           <button
-            onClick={() => setIsUploadOpen(true)}
+            onClick={() => {
+              setUploadHadSuccess(false);
+              setIsUploadOpen(true);
+            }}
             className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-rust-500 hover:bg-rust-600 text-white shadow-lg shadow-rust-500/25 transition-all shrink-0"
           >
             <Upload className="w-3.5 h-3.5" />
@@ -349,10 +352,16 @@ export const FilesView: React.FC<FilesViewProps> = ({
       {/* Modals */}
       <UploadModal
         isOpen={isUploadOpen}
-        onClose={() => setIsUploadOpen(false)}
+        onClose={() => {
+          setIsUploadOpen(false);
+          if (uploadHadSuccess) {
+            onRefresh();
+            setUploadHadSuccess(false);
+          }
+        }}
         onSuccess={(name) => {
+          setUploadHadSuccess(true);
           onNotify('success', 'File Uploaded', `${name} chunked and placed across healthy nodes.`);
-          onRefresh();
         }}
         onError={(err) => onNotify('error', 'Upload Failed', err)}
       />
