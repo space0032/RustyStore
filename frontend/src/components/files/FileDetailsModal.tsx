@@ -4,6 +4,7 @@ import { X, Copy, Layers, Download, AlertCircle, Hash, Server } from 'lucide-rea
 import { FileSummary } from '../../types/api';
 import { formatBytes, formatFullDate, truncateHash, truncateUuid } from '../../utils/formatters';
 import { getFile } from '../../services/api';
+import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
 
 interface FileDetailsModalProps {
   file: FileSummary | null;
@@ -27,6 +28,8 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
     queryFn: () => getFile(file!.file_id),
     enabled: isOpen && !!file,
   });
+  const modalRef = useFocusTrap(isOpen);
+  useEscapeClose(isOpen, onClose);
 
   if (!isOpen || !file) return null;
 
@@ -42,20 +45,21 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
   const details = detailsQuery.data;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="details-modal-title">
+      <div ref={modalRef} className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
         {/* Header */}
         <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-800 shrink-0">
           <div className="min-w-0">
-            <h3 className="font-semibold text-slate-100 truncate">{file.filename}</h3>
+            <h3 id="details-modal-title" className="font-semibold text-slate-100 truncate">{file.filename}</h3>
             <div className="flex items-center gap-2 mt-1">
               <span className="font-mono text-[11px] text-slate-500">{file.file_id}</span>
               <button
                 onClick={() => void handleCopy(file.file_id, 'File UUID')}
                 className="text-slate-500 hover:text-rust-400 transition-colors"
                 title="Copy file UUID"
+                aria-label="Copy file UUID"
               >
-                <Copy className="w-3.5 h-3.5" />
+                <Copy className="w-3.5 h-3.5" aria-hidden="true" />
               </button>
             </div>
           </div>
@@ -76,9 +80,9 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
               <span className="text-xs">Loading chunk manifest...</span>
             </div>
           ) : detailsQuery.error ? (
-            <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-3">
+            <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-3" role="alert" aria-live="assertive">
               <div className="flex items-center gap-3 text-xs text-rose-200">
-                <AlertCircle className="w-4 h-4 shrink-0" />
+                <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
                 <span>{(detailsQuery.error as Error).message}</span>
               </div>
               <button
@@ -136,9 +140,9 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
                             <button
                               onClick={() => void handleCopy(chunk.sha256_hex, 'SHA-256 checksum')}
                               className="flex items-center gap-1.5 font-mono text-[11px] text-emerald-400 hover:text-emerald-300"
-                              title="Copy checksum"
+                              aria-label="Copy SHA-256 checksum"
                             >
-                              <Hash className="w-3 h-3" />
+                              <Hash className="w-3 h-3" aria-hidden="true" />
                               {truncateHash(chunk.sha256_hex, 10, 10)}
                             </button>
                           </td>

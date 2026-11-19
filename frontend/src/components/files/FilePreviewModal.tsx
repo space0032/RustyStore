@@ -3,6 +3,7 @@ import { X, FileText, Image as ImageIcon, Download, AlertCircle, FileCode } from
 import { FileSummary } from '../../types/api';
 import { formatBytes, formatFullDate } from '../../utils/formatters';
 import { downloadFile, fetchFileBlobUrl, fetchFileText, loadSettings } from '../../services/api';
+import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
 
 interface FilePreviewModalProps {
   file: FileSummary | null;
@@ -22,6 +23,8 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const objectUrlRef = useRef<string | null>(null);
+  const modalRef = useFocusTrap(isOpen);
+  useEscapeClose(isOpen, onClose);
 
   const ext = file?.filename.split('.').pop()?.toLowerCase() || '';
   const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
@@ -94,16 +97,16 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   if (!isOpen || !file) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200" role="dialog" aria-modal="true" aria-labelledby="preview-modal-title">
+      <div ref={modalRef} className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="p-2 bg-rust-500/10 text-rust-400 rounded-lg shrink-0">
+            <div className="p-2 bg-rust-500/10 text-rust-400 rounded-lg shrink-0" aria-hidden="true">
               {isImage ? <ImageIcon className="w-5 h-5" /> : isText ? <FileCode className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
             </div>
             <div className="truncate">
-              <h3 className="font-semibold text-slate-100 truncate">{file.filename}</h3>
+              <h3 id="preview-modal-title" className="font-semibold text-slate-100 truncate">{file.filename}</h3>
               <p className="text-xs text-slate-400">
                 {formatBytes(file.total_size)} • {file.chunk_count} chunk(s) • RF={file.replication_factor}
               </p>
@@ -114,12 +117,13 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
               onClick={() => onDownload(file)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
             >
-              <Download className="w-3.5 h-3.5" />
+              <Download className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Download</span>
             </button>
             <button
               onClick={onClose}
               className="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
+              aria-label="Close preview"
             >
               <X className="w-5 h-5" />
             </button>
@@ -129,8 +133,8 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
         {/* Preview Area */}
         <div className="flex-1 overflow-auto p-6 flex flex-col items-center justify-center bg-slate-950/60 min-h-[300px]">
           {loading ? (
-            <div className="flex flex-col items-center gap-2 text-slate-400">
-              <div className="w-6 h-6 border-2 border-rust-500/30 border-t-rust-500 rounded-full animate-spin" />
+            <div className="flex flex-col items-center gap-2 text-slate-400" role="status" aria-live="polite" aria-label="Loading preview">
+              <div className="w-6 h-6 border-2 border-rust-500/30 border-t-rust-500 rounded-full animate-spin" aria-hidden="true" />
               <span className="text-xs">Streaming object chunks...</span>
             </div>
           ) : isImage ? (
@@ -185,8 +189,8 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
           )}
 
           {error && (
-            <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 px-3 py-2 rounded-xl mt-4">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 px-3 py-2 rounded-xl mt-4" role="alert" aria-live="assertive">
+              <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
               <span>{error}</span>
             </div>
           )}

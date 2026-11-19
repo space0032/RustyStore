@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { X, Sliders, Key, Server, RefreshCw, Sparkles } from 'lucide-react';
 import { AppSettings, ConnectionTestResult, testConnection } from '../../services/api';
+import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -18,6 +19,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [form, setForm] = useState<AppSettings>({ ...settings });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
+  const modalRef = useFocusTrap(isOpen);
+  useEscapeClose(isOpen, onClose);
 
   // The modal stays mounted; refresh the form whenever it opens or settings
   // are changed elsewhere (e.g. the navbar Demo Mode toggle).
@@ -48,21 +51,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+      <div ref={modalRef} className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 bg-rust-500/10 text-rust-400 rounded-lg">
+            <div className="p-2 bg-rust-500/10 text-rust-400 rounded-lg" aria-hidden="true">
               <Sliders className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-semibold text-slate-100">Console Settings</h3>
+              <h3 id="settings-modal-title" className="font-semibold text-slate-100">Console Settings</h3>
               <p className="text-xs text-slate-400">Configure connection and development parameters</p>
             </div>
           </div>
           <button
             onClick={onClose}
             className="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
+            aria-label="Close settings"
           >
             <X className="w-5 h-5" />
           </button>
@@ -153,6 +157,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
                     : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
                 }`}
+                role="status"
+                aria-live="polite"
               >
                 <span>{testResult.message}</span>
                 {testResult.requestId && (

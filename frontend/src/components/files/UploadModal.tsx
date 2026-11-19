@@ -3,6 +3,7 @@ import { X, UploadCloud, File as FileIcon, CheckCircle2, Layers, AlertCircle, Ar
 import { formatBytes } from '../../utils/formatters';
 import { uploadFileWithProgress, getDefaultChunkSize } from '../../services/api';
 import { UploadProgress } from '../../types/api';
+import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
 
 interface UploadModalProps {
   isOpen: boolean;
@@ -23,6 +24,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [chunkSize, setChunkSize] = useState<number>(4194304);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const modalRef = useFocusTrap(isOpen && !isUploading);
+  useEscapeClose(isOpen && !isUploading, onClose);
 
   if (!isOpen) return null;
 
@@ -68,8 +71,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200" role="dialog" aria-modal="true" aria-labelledby="upload-modal-title">
+      <div ref={modalRef} className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
@@ -77,7 +80,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               <UploadCloud className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-semibold text-slate-100">Upload to RustyStore</h3>
+              <h3 id="upload-modal-title" className="font-semibold text-slate-100">Upload to RustyStore</h3>
               <p className="text-xs text-slate-400">Streaming upload with chunked placement</p>
             </div>
           </div>
@@ -85,6 +88,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
             <button
               onClick={onClose}
               className="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
+              aria-label="Close upload modal"
             >
               <X className="w-5 h-5" />
             </button>
@@ -102,11 +106,20 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleFileDrop}
               onClick={() => fileInputRef.current?.click()}
+              role="button"
+              tabIndex={0}
+              aria-label="Drop zone for file upload"
               className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center gap-3 cursor-pointer transition-all ${
                 isDragging
                   ? 'border-rust-500 bg-rust-500/10'
                   : 'border-slate-700 hover:border-rust-500/60 bg-slate-950/50 hover:bg-slate-950'
               }`}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
             >
               <input
                 ref={fileInputRef}
@@ -126,7 +139,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                   Click to browse or drop your file here
                 </span>
                 <p className="text-xs text-slate-400 mt-1">
-                  Supports any file type. Uploads are streamed and chunked in 4 MiB blocks.
+                  Supports any file type. Uploads are streamed and chunked in {formatBytes(chunkSize)} blocks.
                 </p>
               </div>
             </div>
@@ -192,7 +205,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
               {/* Progress Bar */}
               {isUploading && progress && (
-                <div className="space-y-2 pt-2">
+                <div className="space-y-2 pt-2" role="status" aria-live="polite" aria-label="Upload progress">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-slate-300 font-medium">
                       Chunk {progress.currentChunkEstimate} of {progress.totalChunksEstimate}
@@ -201,7 +214,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                       {progress.percentage}%
                     </span>
                   </div>
-                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden" role="progressbar" aria-valuenow={progress.percentage} aria-valuemin={0} aria-valuemax={100} aria-label="Upload progress">
                     <div
                       className="h-full bg-gradient-to-r from-rust-500 to-amber-500 transition-all duration-200"
                       style={{ width: `${progress.percentage}%` }}
@@ -235,13 +248,13 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           >
             {isUploading ? (
               <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" aria-hidden="true" />
                 <span>Uploading...</span>
               </>
             ) : (
               <>
                 <span>Commit & Replicate</span>
-                <ArrowUpRight className="w-4 h-4" />
+                <ArrowUpRight className="w-4 h-4" aria-hidden="true" />
               </>
             )}
           </button>
