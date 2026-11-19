@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { X, Sliders, Key, Server, RefreshCw, Sparkles } from 'lucide-react';
-import { AppSettings } from '../../services/api';
+import { AppSettings, ConnectionTestResult, testConnection } from '../../services/api';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -16,14 +16,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSave,
 }) => {
   const [form, setForm] = useState<AppSettings>({ ...settings });
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   // The modal stays mounted; refresh the form whenever it opens or settings
   // are changed elsewhere (e.g. the navbar Demo Mode toggle).
   useEffect(() => {
-    if (isOpen) setForm({ ...settings });
+    if (isOpen) {
+      setForm({ ...settings });
+      setTestResult(null);
+    }
   }, [isOpen, settings]);
 
   if (!isOpen) return null;
+
+  const handleTest = async () => {
+    onSave(form);
+    setTesting(true);
+    setTestResult(null);
+    try {
+      setTestResult(await testConnection());
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,6 +125,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <p className="text-[11px] text-slate-500">
               Passed via <code className="text-slate-400">Authorization: Bearer &lt;token&gt;</code> header.
             </p>
+          </div>
+
+          {/* Connection Test */}
+          <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-800 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <span className="text-sm font-medium text-slate-200">Connection Test</span>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Saves these values, then checks gateway health, readiness, and credentials.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={testing}
+                onClick={() => void handleTest()}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-semibold text-slate-100 transition-colors disabled:opacity-50 shrink-0"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${testing ? 'animate-spin' : ''}`} />
+                {testing ? 'Testing...' : 'Save & Test'}
+              </button>
+            </div>
+            {testResult && (
+              <div
+                className={`p-3 rounded-lg text-xs border ${
+                  testResult.ok
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                }`}
+              >
+                <span>{testResult.message}</span>
+                {testResult.requestId && (
+                  <span className="block mt-1 font-mono text-[10px] opacity-70">
+                    request {testResult.requestId}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Polling Interval */}

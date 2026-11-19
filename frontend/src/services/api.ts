@@ -23,6 +23,39 @@ import {
 import { nextId } from '../utils/id';
 
 const SETTINGS_KEY = 'rustystore_settings';
+const FETCH_TIMEOUT_MS = 10000;
+
+/** Structured gateway error with correlation info for the UI. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly requestId?: string;
+
+  constructor(message: string, status: number, code?: string, requestId?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
+async function throwApiError(res: Response): Promise<never> {
+  let message = `${res.status} ${res.statusText}`;
+  let code: string | undefined;
+  try {
+    const body = await res.json();
+    code = body?.error?.code;
+    message = body?.error?.message ?? body?.reason ?? message;
+  } catch {
+    // Non-JSON error body; keep the HTTP status message.
+  }
+  throw new ApiError(message, res.status, code, res.headers.get('x-request-id') ?? undefined);
+}
+
+export function toErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export interface AppSettings {
   baseUrl: string;
@@ -100,9 +133,16 @@ export async function checkReadiness(): Promise<ReadinessResponse> {
     if (res.ok) {
       return (await res.json()) as ReadinessResponse;
     }
-    return { status: 'not_ready', reason: `HTTP ${res.status}` };
+    let reason = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      reason = body?.reason ?? body?.error?.message ?? reason;
+    } catch {
+      // Keep the HTTP status as the reason.
+    }
+    return { status: 'not_ready', reason };
   } catch (err) {
-    return { status: 'not_ready', reason: (err as Error).message };
+    return { status: 'not_ready', reason: toErrorMessage(err) };
   }
 }
 
@@ -113,8 +153,9 @@ export async function checkHealth(): Promise<HealthResponse> {
   }
   const res = await fetch(buildUrl('/api/v1/health'), {
     headers: getHeaders(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`Health check failed: ${res.statusText}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -132,8 +173,9 @@ export async function listFiles(
 
   const res = await fetch(buildUrl(`/api/v1/files?${params.toString()}`), {
     headers: getHeaders(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`Failed to list files: ${res.statusText}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -156,8 +198,9 @@ export async function getFile(fileId: string): Promise<FileInfo> {
   }
   const res = await fetch(buildUrl(`/api/v1/files/${fileId}`), {
     headers: getHeaders(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`Failed to get file info: ${res.statusText}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -177,8 +220,9 @@ export async function deleteFile(fileId: string): Promise<DeleteFileResponse> {
   const res = await fetch(buildUrl(`/api/v1/files/${fileId}`), {
     method: 'DELETE',
     headers: getHeaders(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`Failed to delete file: ${res.statusText}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -197,6 +241,7 @@ export function downloadFile(fileId: string, filename: string): Promise<void> {
     const url = getDownloadUrl(fileId);
     const xhr = new XMLHttpRequest();
     xhr.open('GET', url, true);
+    xhr.timeout = 30000;
     xhr.responseType = 'blob';
 
     const headers = getHeaders();
@@ -207,10 +252,11 @@ export function downloadFile(fileId: string, filename: string): Promise<void> {
         saveBlob(xhr.response, filename);
         resolve();
       } else {
-        reject(new Error(`Download failed with status ${xhr.status}`));
+        reject(new ApiError(`Download failed with status ${xhr.status}`, xhr.status));
       }
     };
-    xhr.onerror = () => reject(new Error('Network error during download'));
+    xhr.onerror = () => reject(new ApiError('Network error during download', 0));
+    xhr.ontimeout = () => reject(new ApiError('Download timed out', 0));
     xhr.send();
   });
 }
@@ -269,6 +315,7 @@ export function uploadFileWithProgress(
     const xhr = new XMLHttpRequest();
     const url = buildUrl('/api/v1/files');
     xhr.open('POST', url, true);
+    xhr.timeout = 30000;
 
     const headers = getHeaders({
       'x-filename': file.name,
@@ -301,14 +348,15 @@ export function uploadFileWithProgress(
           const res = JSON.parse(xhr.responseText) as UploadResponse;
           resolve(res);
         } catch (e) {
-          reject(new Error('Invalid response from server'));
+          reject(new ApiError('Invalid response from server', xhr.status));
         }
       } else {
-        reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
+        reject(new ApiError(`Upload failed (${xhr.status}): ${xhr.responseText}`, xhr.status));
       }
     };
 
-    xhr.onerror = () => reject(new Error('Network error during upload'));
+    xhr.onerror = () => reject(new ApiError('Network error during upload', 0));
+    xhr.ontimeout = () => reject(new ApiError('Upload timed out', 0));
     xhr.send(file);
   });
 }
@@ -320,8 +368,9 @@ export async function listNodes(): Promise<NodeInfo[]> {
   }
   const res = await fetch(buildUrl('/api/v1/cluster/nodes'), {
     headers: getHeaders(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`Failed to list nodes: ${res.statusText}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -335,8 +384,9 @@ export async function getClusterStats(): Promise<ClusterStats> {
   }
   const res = await fetch(buildUrl('/api/v1/cluster/stats'), {
     headers: getHeaders(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`Failed to get cluster stats: ${res.statusText}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -349,8 +399,11 @@ export async function getMetrics(): Promise<ParsedPrometheusMetrics> {
     text = MOCK_PROMETHEUS_RAW;
   } else {
     try {
-      const res = await fetch(buildUrl('/metrics'), { headers: getHeaders() });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(buildUrl('/metrics'), {
+        headers: getHeaders(),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) await throwApiError(res);
       text = await res.text();
     } catch (e) {
       // Never show mock counters as if they were live telemetry.
@@ -382,8 +435,11 @@ export async function fetchFileText(fileId: string): Promise<string> {
   if (settings.demoMode) {
     return `RustyStore demo preview for ${fileId}\n\nThis is simulated text content. Disable Demo Mode to stream the real object from the gateway.`;
   }
-  const res = await fetch(getDownloadUrl(fileId), { headers: getHeaders() });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const res = await fetch(getDownloadUrl(fileId), {
+    headers: getHeaders(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!res.ok) await throwApiError(res);
   return res.text();
 }
 
@@ -395,9 +451,40 @@ export async function fetchFileBlobUrl(fileId: string): Promise<string> {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#0f172a"/><text x="320" y="175" fill="#e05a47" font-family="sans-serif" font-size="24" text-anchor="middle">RustyStore Demo Preview</text><text x="320" y="210" fill="#94a3b8" font-family="sans-serif" font-size="14" text-anchor="middle">${fileId}</text></svg>`;
     blob = new Blob([svg], { type: 'image/svg+xml' });
   } else {
-    const res = await fetch(getDownloadUrl(fileId), { headers: getHeaders() });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await fetch(getDownloadUrl(fileId), {
+      headers: getHeaders(),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) await throwApiError(res);
     blob = await res.blob();
   }
   return window.URL.createObjectURL(blob);
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  message: string;
+  requestId?: string;
+}
+
+/** Validate gateway health, readiness, and the configured credentials. */
+export async function testConnection(): Promise<ConnectionTestResult> {
+  if (loadSettings().demoMode) {
+    return { ok: true, message: 'Demo Mode is active; no gateway connection is required.' };
+  }
+  try {
+    const health = await checkHealth();
+    const ready = await checkReadiness();
+    if (ready.status !== 'ready') {
+      return { ok: false, message: ready.reason ?? 'Coordinator is not ready.' };
+    }
+    return { ok: true, message: `${health.service} is healthy and the coordinator is reachable.` };
+  } catch (err) {
+    const apiError = err instanceof ApiError ? err : undefined;
+    return {
+      ok: false,
+      message: toErrorMessage(err),
+      requestId: apiError?.requestId,
+    };
+  }
 }

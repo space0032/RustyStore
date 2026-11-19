@@ -5,6 +5,7 @@ import {
   RefreshCw,
   Download,
   Eye,
+  Info,
   Layers,
   Trash2,
   File as FileIcon,
@@ -28,6 +29,7 @@ interface FilesViewProps {
   nextCursor?: string;
   onLoadMore?: () => void;
   loadingMore?: boolean;
+  onViewDetails: (file: FileSummary) => void;
   onInspectChunks: (fileId: string) => void;
   onDownloadFile: (file: FileSummary) => void;
   onNotify: (type: 'success' | 'error' | 'info' | 'warning', title: string, message?: string) => void;
@@ -40,6 +42,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   nextCursor,
   onLoadMore,
   loadingMore = false,
+  onViewDetails,
   onInspectChunks,
   onDownloadFile,
   onNotify,
@@ -206,9 +209,18 @@ export const FilesView: React.FC<FilesViewProps> = ({
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
+                          onClick={() => onViewDetails(file)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-slate-800 transition-colors"
+                          title="File Details"
+                          aria-label={`Details for ${file.filename}`}
+                        >
+                          <Info className="w-3.5 h-3.5" />
+                        </button>
+                        <button
                           onClick={() => setPreviewFile(file)}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
                           title="Preview Object"
+                          aria-label={`Preview ${file.filename}`}
                         >
                           <Eye className="w-3.5 h-3.5" />
                         </button>

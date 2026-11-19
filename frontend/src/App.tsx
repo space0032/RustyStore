@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useMemo, lazy, Suspense } from 'react';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Navbar } from './components/layout/Navbar';
 import { Sidebar, ActiveTab } from './components/layout/Sidebar';
 import { ToastContainer, ToastMessage, ToastType } from './components/common/Toast';
@@ -6,14 +7,13 @@ import { SettingsModal } from './components/settings/SettingsModal';
 import { FilesView } from './views/FilesView';
 import { ChunkVisualizerView } from './views/ChunkVisualizerView';
 import { ClusterView } from './views/ClusterView';
-import { MetricsView } from './views/MetricsView';
-import {
-  ClusterStats,
-  FileSummary,
-  NodeInfo,
-  ParsedPrometheusMetrics,
-  ReadinessResponse,
-} from './types/api';
+import { FileDetailsModal } from './components/files/FileDetailsModal';
+
+// Recharts is only needed on the Metrics tab; keep it out of the main bundle.
+const MetricsView = lazy(() =>
+  import('./views/MetricsView').then((module) => ({ default: module.MetricsView }))
+);
+import { FileSummary } from './types/api';
 import {
   checkReadiness,
   downloadFile,
@@ -27,24 +27,91 @@ import {
 } from './services/api';
 import { nextId } from './utils/id';
 
+interface EndpointError {
+  label: string;
+  message: string;
+  status?: number;
+  requestId?: string;
+}
+
+function toEndpointError(label: string, error: unknown): EndpointError {
+  const err = error as { message?: string; status?: number; requestId?: string } | null;
+  return {
+    label,
+    message: err?.message ?? 'Unknown error',
+    status: err?.status,
+    requestId: err?.requestId,
+  };
+}
+
 export function App() {
+  const queryClient = useQueryClient();
   const [settings, setSettings] = useState<AppSettings>(loadSettings());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>('files');
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
-
-  // Cluster data state
-  const [files, setFiles] = useState<FileSummary[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
-  const cursorRef = useRef<string | undefined>(undefined);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
-  const [stats, setStats] = useState<ClusterStats | null>(null);
-  const [readiness, setReadiness] = useState<ReadinessResponse | undefined>(undefined);
-  const [metrics, setMetrics] = useState<ParsedPrometheusMetrics | null>(null);
-
-  const [loading, setLoading] = useState(false);
+  const [detailsFile, setDetailsFile] = useState<FileSummary | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const pollInterval = settings.pollIntervalMs > 0 ? settings.pollIntervalMs : false;
+
+  const readinessQuery = useQuery({
+    queryKey: ['readiness'],
+    queryFn: checkReadiness,
+    refetchInterval: pollInterval,
+  });
+  const filesQuery = useInfiniteQuery({
+    queryKey: ['files'],
+    queryFn: ({ pageParam }) => listFiles(50, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor,
+    refetchInterval: pollInterval,
+  });
+  const nodesQuery = useQuery({
+    queryKey: ['nodes'],
+    queryFn: listNodes,
+    refetchInterval: pollInterval,
+  });
+  const statsQuery = useQuery({
+    queryKey: ['stats'],
+    queryFn: getClusterStats,
+    refetchInterval: pollInterval,
+  });
+  const metricsQuery = useQuery({
+    queryKey: ['metrics'],
+    queryFn: getMetrics,
+    refetchInterval: pollInterval,
+  });
+
+  const files = useMemo(
+    () => filesQuery.data?.pages.flatMap((page) => page.files) ?? [],
+    [filesQuery.data]
+  );
+
+  const loading = filesQuery.isPending || nodesQuery.isPending || statsQuery.isPending;
+  const isFetching =
+    filesQuery.isFetching ||
+    nodesQuery.isFetching ||
+    statsQuery.isFetching ||
+    metricsQuery.isFetching ||
+    readinessQuery.isFetching;
+
+  const endpointErrors: EndpointError[] = [
+    filesQuery.error && toEndpointError('Object list', filesQuery.error),
+    nodesQuery.error && toEndpointError('Node list', nodesQuery.error),
+    statsQuery.error && toEndpointError('Cluster stats', statsQuery.error),
+    metricsQuery.error && toEndpointError('Metrics', metricsQuery.error),
+    readinessQuery.data?.status === 'not_ready' && {
+      label: 'Readiness',
+      message: readinessQuery.data.reason ?? 'Coordinator is not ready.',
+    },
+  ].filter((e): e is EndpointError => Boolean(e));
+
+  const authError = endpointErrors.find((e) => e.status === 401 || e.status === 403);
+
+  const handleRefresh = useCallback(() => {
+    void queryClient.invalidateQueries();
+  }, [queryClient]);
 
   const notify = useCallback((type: ToastType, title: string, message?: string) => {
     const id = nextId('toast');
@@ -58,60 +125,10 @@ export function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const fetchData = useCallback(async (append = false) => {
-    if (append) setLoadingMore(true);
-    else setLoading(true);
-    try {
-      const [readyRes, filesRes, nodesRes, statsRes, metricsRes] = await Promise.allSettled([
-        checkReadiness(),
-        listFiles(50, append ? cursorRef.current : undefined),
-        listNodes(),
-        getClusterStats(),
-        getMetrics(),
-      ]);
-
-      if (readyRes.status === 'fulfilled') setReadiness(readyRes.value);
-      if (filesRes.status === 'fulfilled') {
-        const page = filesRes.value.files;
-        setFiles((prev) => {
-          if (!append) return page;
-          const seen = new Set(prev.map((f) => f.file_id));
-          return [...prev, ...page.filter((f) => !seen.has(f.file_id))];
-        });
-        cursorRef.current = filesRes.value.next_cursor;
-        setNextCursor(filesRes.value.next_cursor);
-      }
-      if (nodesRes.status === 'fulfilled') setNodes(nodesRes.value);
-      if (statsRes.status === 'fulfilled') setStats(statsRes.value);
-      if (metricsRes.status === 'fulfilled') setMetrics(metricsRes.value);
-    } catch (err) {
-      console.error('Error fetching cluster data', err);
-    } finally {
-      setLoading(false);
-      setLoadingMore(false);
-    }
-  }, []);
-
-  const handleLoadMore = useCallback(() => {
-    if (nextCursor && !loading && !loadingMore) void fetchData(true);
-  }, [nextCursor, loading, loadingMore, fetchData]);
-
-  useEffect(() => {
-    fetchData();
-  }, [fetchData, settings.demoMode]);
-
-  // Polling loop
-  useEffect(() => {
-    if (!settings.pollIntervalMs || settings.pollIntervalMs <= 0) return;
-    const interval = setInterval(() => {
-      fetchData();
-    }, settings.pollIntervalMs);
-    return () => clearInterval(interval);
-  }, [fetchData, settings.pollIntervalMs]);
-
   const handleSaveSettings = (newSettings: AppSettings) => {
     setSettings(newSettings);
     saveSettings(newSettings);
+    void queryClient.invalidateQueries();
     notify('success', 'Settings Saved', 'Connection parameters have been updated.');
   };
 
@@ -119,6 +136,7 @@ export function App() {
     const updated = { ...settings, demoMode: !settings.demoMode };
     setSettings(updated);
     saveSettings(updated);
+    void queryClient.invalidateQueries();
     notify(
       'info',
       updated.demoMode ? 'Demo Mode Enabled' : 'Demo Mode Disabled',
@@ -130,6 +148,7 @@ export function App() {
 
   const handleInspectChunks = (fileId: string) => {
     setSelectedFileId(fileId);
+    setDetailsFile(null);
     setActiveTab('chunks');
   };
 
@@ -146,9 +165,9 @@ export function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col antialiased">
       <Navbar
-        readiness={readiness}
-        isFetching={loading}
-        onRefresh={fetchData}
+        readiness={readinessQuery.data}
+        isFetching={isFetching}
+        onRefresh={handleRefresh}
         settings={settings}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onToggleDemo={handleToggleDemo}
@@ -159,18 +178,62 @@ export function App() {
           activeTab={activeTab}
           onTabChange={setActiveTab}
           fileCount={files.length}
-          nodeCount={nodes.length}
+          nodeCount={nodesQuery.data?.length ?? 0}
         />
 
         <main className="flex-1 flex flex-col overflow-hidden">
+          {(endpointErrors.length > 0 || authError) && (
+            <div className="px-6 pt-4 space-y-2" role="alert">
+              {authError && (
+                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-3 text-xs">
+                  <div>
+                    <span className="font-semibold text-rose-300">Authentication failed. </span>
+                    <span className="text-rose-200/80">Check the API key in settings and retry.</span>
+                  </div>
+                  <button
+                    onClick={() => setIsSettingsOpen(true)}
+                    className="shrink-0 px-3 py-1.5 rounded-lg bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 transition-colors"
+                  >
+                    Open Settings
+                  </button>
+                </div>
+              )}
+              {endpointErrors.map((err) => (
+                <div
+                  key={err.label}
+                  className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-3 text-xs"
+                >
+                  <div className="min-w-0">
+                    <span className="font-semibold text-amber-300">{err.label}: </span>
+                    <span className="text-amber-100/80">{err.message}</span>
+                    {err.requestId && (
+                      <span className="ml-2 font-mono text-[10px] text-amber-200/60">
+                        request {err.requestId}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleRefresh}
+                    className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 transition-colors"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           {activeTab === 'files' && (
             <FilesView
               files={files}
-              loading={loading}
-              onRefresh={fetchData}
-              nextCursor={nextCursor}
-              onLoadMore={handleLoadMore}
-              loadingMore={loadingMore}
+              loading={filesQuery.isPending}
+              onRefresh={handleRefresh}
+              nextCursor={filesQuery.data?.pages[filesQuery.data.pages.length - 1]?.next_cursor}
+              onLoadMore={
+                filesQuery.hasNextPage ? () => void filesQuery.fetchNextPage() : undefined
+              }
+              loadingMore={filesQuery.isFetchingNextPage}
+              onViewDetails={setDetailsFile}
               onInspectChunks={handleInspectChunks}
               onDownloadFile={handleDownload}
               onNotify={notify}
@@ -180,7 +243,7 @@ export function App() {
           {activeTab === 'chunks' && (
             <ChunkVisualizerView
               files={files}
-              nodes={nodes}
+              nodes={nodesQuery.data ?? []}
               selectedFileId={selectedFileId}
               onSelectFileId={setSelectedFileId}
               onNotify={notify}
@@ -189,20 +252,28 @@ export function App() {
 
           {activeTab === 'cluster' && (
             <ClusterView
-              stats={stats}
-              nodes={nodes}
+              stats={statsQuery.data ?? null}
+              nodes={nodesQuery.data ?? []}
               loading={loading}
-              onRefresh={fetchData}
+              onRefresh={handleRefresh}
             />
           )}
 
           {activeTab === 'metrics' && (
-            <MetricsView
-              metrics={metrics}
-              loading={loading}
-              onRefresh={fetchData}
-              onNotify={notify}
-            />
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-xs text-slate-400">
+                  Loading telemetry view...
+                </div>
+              }
+            >
+              <MetricsView
+                metrics={metricsQuery.data ?? null}
+                loading={metricsQuery.isPending}
+                onRefresh={handleRefresh}
+                onNotify={notify}
+              />
+            </Suspense>
           )}
         </main>
       </div>
@@ -212,6 +283,15 @@ export function App() {
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
         onSave={handleSaveSettings}
+      />
+
+      <FileDetailsModal
+        file={detailsFile}
+        isOpen={!!detailsFile}
+        onClose={() => setDetailsFile(null)}
+        onInspectChunks={handleInspectChunks}
+        onDownload={handleDownload}
+        onNotify={notify}
       />
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
