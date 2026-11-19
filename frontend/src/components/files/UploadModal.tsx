@@ -1,7 +1,7 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { X, UploadCloud, File as FileIcon, CheckCircle2, Layers, AlertCircle, ArrowUpRight } from 'lucide-react';
 import { formatBytes } from '../../utils/formatters';
-import { uploadFileWithProgress } from '../../services/api';
+import { uploadFileWithProgress, getDefaultChunkSize } from '../../services/api';
 import { UploadProgress } from '../../types/api';
 
 interface UploadModalProps {
@@ -21,13 +21,18 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [progress, setProgress] = useState<UploadProgress | null>(null);
+  const [chunkSize, setChunkSize] = useState<number>(4194304);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
 
-  const CHUNK_SIZE = 4194304; // 4 MiB
+  // Fetch the default chunk size from the cluster on mount
+  useEffect(() => {
+    getDefaultChunkSize().then(setChunkSize).catch(() => setChunkSize(4194304));
+  }, []);
+
   const estimatedChunks = selectedFile
-    ? Math.max(1, Math.ceil(selectedFile.size / CHUNK_SIZE))
+    ? Math.max(1, Math.ceil(selectedFile.size / chunkSize))
     : 0;
 
   const handleFileDrop = (e: React.DragEvent) => {
@@ -50,7 +55,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     });
 
     try {
-      await uploadFileWithProgress(selectedFile, CHUNK_SIZE, (p) => {
+      await uploadFileWithProgress(selectedFile, chunkSize, (p) => {
         setProgress(p);
       });
       onSuccess(selectedFile.name);
@@ -170,7 +175,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                   </div>
                   <div>
                     Chunk Size:{' '}
-                    <span className="text-slate-200 font-mono font-medium">4 MiB</span>
+                    <span className="text-slate-200 font-mono font-medium">{formatBytes(chunkSize)}</span>
                   </div>
                   <div>
                     Replication Factor:{' '}

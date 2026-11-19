@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { X, FileText, Image as ImageIcon, Download, AlertCircle, FileCode } from 'lucide-react';
 import { FileSummary } from '../../types/api';
 import { formatBytes, formatFullDate } from '../../utils/formatters';
@@ -21,6 +21,7 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
 
   const ext = file?.filename.split('.').pop()?.toLowerCase() || '';
   const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
@@ -28,16 +29,27 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   const isVideo = ['mp4', 'webm', 'ogg'].includes(ext);
   const isAudio = ['mp3', 'wav', 'ogg', 'm4a'].includes(ext);
 
+  const revokeUrl = () => {
+    if (objectUrlRef.current) {
+      window.URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+  };
+
   useEffect(() => {
-    if (!isOpen || !file) return;
+    if (!isOpen || !file) {
+      revokeUrl();
+      return;
+    }
 
     let active = true;
-    let objectUrl: string | null = null;
     setContent(null);
     setMediaUrl(null);
     setError(null);
+    revokeUrl();
 
-    if (loadSettings().demoMode && (isVideo || isAudio)) {
+    const settings = loadSettings();
+    if (settings.demoMode && (isVideo || isAudio)) {
       setError('Media playback is unavailable in Demo Mode.');
       return;
     }
@@ -62,7 +74,7 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
             window.URL.revokeObjectURL(url);
             return;
           }
-          objectUrl = url;
+          objectUrlRef.current = url;
           setMediaUrl(url);
         })
         .catch((err) => {
@@ -75,7 +87,7 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
 
     return () => {
       active = false;
-      if (objectUrl) window.URL.revokeObjectURL(objectUrl);
+      revokeUrl();
     };
   }, [isOpen, file?.file_id, file?.total_size, isText, isImage, isVideo, isAudio]);
 

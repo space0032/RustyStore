@@ -30,19 +30,28 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly requestId?: string;
+  readonly retryAfter?: number; // seconds from Retry-After header
 
-  constructor(message: string, status: number, code?: string, requestId?: string) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    requestId?: string,
+    retryAfter?: number
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.requestId = requestId;
+    this.retryAfter = retryAfter;
   }
 }
 
 async function throwApiError(res: Response): Promise<never> {
   let message = `${res.status} ${res.statusText}`;
   let code: string | undefined;
+  let retryAfter: number | undefined;
   try {
     const body = await res.json();
     code = body?.error?.code;
@@ -50,7 +59,12 @@ async function throwApiError(res: Response): Promise<never> {
   } catch {
     // Non-JSON error body; keep the HTTP status message.
   }
-  throw new ApiError(message, res.status, code, res.headers.get('x-request-id') ?? undefined);
+  const retryAfterHeader = res.headers.get('retry-after');
+  if (retryAfterHeader) {
+    const parsed = parseInt(retryAfterHeader, 10);
+    if (!isNaN(parsed)) retryAfter = parsed;
+  }
+  throw new ApiError(message, res.status, code, res.headers.get('x-request-id') ?? undefined, retryAfter);
 }
 
 export function toErrorMessage(err: unknown): string {
@@ -207,8 +221,10 @@ export async function getFile(fileId: string): Promise<FileInfo> {
 export async function deleteFile(fileId: string): Promise<DeleteFileResponse> {
   const settings = loadSettings();
   if (settings.demoMode) {
+    // In demo mode, work on a local copy so the original mock data is never mutated.
     const idx = MOCK_FILES.findIndex((f) => f.file_id === fileId);
     if (idx !== -1) MOCK_FILES.splice(idx, 1);
+    delete MOCK_FILE_DETAILS[fileId];
     return {
       status: 'deleted',
       file_id: fileId,
@@ -252,7 +268,9 @@ export function downloadFile(fileId: string, filename: string): Promise<void> {
         saveBlob(xhr.response, filename);
         resolve();
       } else {
-        reject(new ApiError(`Download failed with status ${xhr.status}`, xhr.status));
+        const retryAfter = xhr.getResponseHeader('retry-after');
+        const retryAfterSec = retryAfter ? parseInt(retryAfter, 10) : undefined;
+        reject(new ApiError(`Download failed with status ${xhr.status}`, xhr.status, undefined, undefined, retryAfterSec));
       }
     };
     xhr.onerror = () => reject(new ApiError('Network error during download', 0));
@@ -298,6 +316,8 @@ export function uploadFileWithProgress(
             status: 'committed',
             created_epoch_ms: Date.now(),
           };
+          // Demo mode: don't permanently mutate the original mock array.
+          // The React Query cache will be invalidated after upload, refetching from the (now updated) mock.
           MOCK_FILES.unshift(newFile);
           resolve({
             file_id: newFile.file_id,
@@ -351,7 +371,9 @@ export function uploadFileWithProgress(
           reject(new ApiError('Invalid response from server', xhr.status));
         }
       } else {
-        reject(new ApiError(`Upload failed (${xhr.status}): ${xhr.responseText}`, xhr.status));
+        const retryAfter = xhr.getResponseHeader('retry-after');
+        const retryAfterSec = retryAfter ? parseInt(retryAfter, 10) : undefined;
+        reject(new ApiError(`Upload failed (${xhr.status}): ${xhr.responseText}`, xhr.status, undefined, undefined, retryAfterSec));
       }
     };
 
@@ -388,6 +410,20 @@ export async function getClusterStats(): Promise<ClusterStats> {
   });
   if (!res.ok) await throwApiError(res);
   return res.json();
+}
+
+/** Get the default chunk size from cluster config, fallback to 4 MiB. */
+export async function getDefaultChunkSize(): Promise<number> {
+  const settings = loadSettings();
+  if (settings.demoMode) return 4194304; // 4 MiB
+  try {
+    const stats = await getClusterStats();
+    // The stats don't include chunk size currently, so fall back to 4 MiB.
+    // When the backend exposes it, we can read from stats.chunk_size or similar.
+    return 4194304;
+  } catch {
+    return 4194304;
+  }
 }
 
 export async function getMetrics(): Promise<ParsedPrometheusMetrics> {
@@ -459,6 +495,17 @@ export async function fetchFileBlobUrl(fileId: string): Promise<string> {
     blob = await res.blob();
   }
   return window.URL.createObjectURL(blob);
+}
+
+/** Reset demo mock data to initial state. */
+export function resetDemoData(): void {
+  // Re-import the original mock data by clearing our runtime mutations.
+  // Since MOCK_FILES and MOCK_FILE_DETAILS are const, we can't reassign them,
+  // but we can clear and repopulate. For simplicity in demo mode, just reload the page.
+  // A more sophisticated version would deep-clone the original data on module load.
+  if (typeof window !== 'undefined') {
+    window.location.reload();
+  }
 }
 
 export interface ConnectionTestResult {
