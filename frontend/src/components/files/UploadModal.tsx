@@ -27,12 +27,14 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const modalRef = useFocusTrap(isOpen && !isUploading);
   useEscapeClose(isOpen && !isUploading, onClose);
 
-  if (!isOpen) return null;
-
   // Fetch the default chunk size from the cluster on mount
   useEffect(() => {
-    getDefaultChunkSize().then(setChunkSize).catch(() => setChunkSize(4194304));
-  }, []);
+    if (isOpen) {
+      getDefaultChunkSize().then(setChunkSize).catch(() => setChunkSize(4194304));
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
 
   const estimatedChunks = selectedFile
     ? Math.max(1, Math.ceil(selectedFile.size / chunkSize))
