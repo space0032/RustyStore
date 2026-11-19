@@ -46,18 +46,19 @@ function toEndpointError(label: string, error: unknown): EndpointError {
   };
 }
 
-function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null } {
+function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null; detailsId: string | null } {
   try {
     const params = new URLSearchParams(window.location.search);
     const tabParam = params.get('tab');
     const tab: ActiveTab =
       tabParam === 'chunks' || tabParam === 'cluster' || tabParam === 'metrics' ? tabParam : 'files';
     const fileId = params.get('file');
-    return { tab, fileId: fileId || null };
+    const detailsId = params.get('details');
+    return { tab, fileId: fileId || null, detailsId: detailsId || null };
   } catch {
     // ignore
   }
-  return { tab: 'files', fileId: null };
+  return { tab: 'files', fileId: null, detailsId: null };
 }
 
 export function App() {
@@ -67,7 +68,7 @@ export function App() {
   const initialRoute = getRouteFromUrl();
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialRoute.tab);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(initialRoute.fileId);
-  const [detailsFile, setDetailsFile] = useState<FileSummary | null>(null);
+  const [detailsFileId, setDetailsFileId] = useState<string | null>(initialRoute.detailsId);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   React.useEffect(() => {
@@ -82,10 +83,15 @@ export function App() {
     } else {
       params.delete('file');
     }
+    if (detailsFileId) {
+      params.set('details', detailsFileId);
+    } else {
+      params.delete('details');
+    }
     const qs = params.toString();
     const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
     window.history.replaceState(null, '', url);
-  }, [activeTab, selectedFileId]);
+  }, [activeTab, selectedFileId, detailsFileId]);
 
   React.useEffect(() => {
     const onPopState = () => {
@@ -96,6 +102,7 @@ export function App() {
       } else {
         setSelectedFileId(null);
       }
+      setDetailsFileId(route.detailsId);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -135,6 +142,22 @@ export function App() {
     () => filesQuery.data?.pages.flatMap((page) => page.files) ?? [],
     [filesQuery.data]
   );
+
+  const detailsFile = useMemo(() => {
+    if (!detailsFileId) return null;
+    const found = files.find((f) => f.file_id === detailsFileId);
+    if (found) return found;
+    // Fallback so deep links still open even if the file isn't in loaded pages yet.
+    return {
+      file_id: detailsFileId,
+      filename: 'Loading...',
+      total_size: 0,
+      chunk_count: 0,
+      replication_factor: 3,
+      status: 'unknown',
+      created_epoch_ms: 0,
+    } as FileSummary;
+  }, [detailsFileId, files]);
 
   const loading = filesQuery.isPending || nodesQuery.isPending || statsQuery.isPending;
   const isFetching =
@@ -205,7 +228,7 @@ export function App() {
 
   const handleInspectChunks = (fileId: string) => {
     setSelectedFileId(fileId);
-    setDetailsFile(null);
+    setDetailsFileId(null);
     setActiveTab('chunks');
   };
 
@@ -295,7 +318,7 @@ export function App() {
                 filesQuery.hasNextPage ? () => void filesQuery.fetchNextPage() : undefined
               }
               loadingMore={filesQuery.isFetchingNextPage}
-              onViewDetails={setDetailsFile}
+              onViewDetails={(file) => setDetailsFileId(file.file_id)}
               onInspectChunks={handleInspectChunks}
               onDownloadFile={handleDownload}
               onNotify={notify}
@@ -349,8 +372,8 @@ export function App() {
 
       <FileDetailsModal
         file={detailsFile}
-        isOpen={!!detailsFile}
-        onClose={() => setDetailsFile(null)}
+        isOpen={!!detailsFileId}
+        onClose={() => setDetailsFileId(null)}
         onInspectChunks={handleInspectChunks}
         onDownload={handleDownload}
         onNotify={notify}
