@@ -46,23 +46,27 @@ function toEndpointError(label: string, error: unknown): EndpointError {
   };
 }
 
-function getTabFromUrl(): ActiveTab {
+function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null } {
   try {
     const params = new URLSearchParams(window.location.search);
-    const tab = params.get('tab');
-    if (tab === 'chunks' || tab === 'cluster' || tab === 'metrics') return tab;
+    const tabParam = params.get('tab');
+    const tab: ActiveTab =
+      tabParam === 'chunks' || tabParam === 'cluster' || tabParam === 'metrics' ? tabParam : 'files';
+    const fileId = params.get('file');
+    return { tab, fileId: fileId || null };
   } catch {
     // ignore
   }
-  return 'files';
+  return { tab: 'files', fileId: null };
 }
 
 export function App() {
   const queryClient = useQueryClient();
   const [settings, setSettings] = useState<AppSettings>(loadSettings());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<ActiveTab>(getTabFromUrl);
-  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const initialRoute = getRouteFromUrl();
+  const [activeTab, setActiveTab] = useState<ActiveTab>(initialRoute.tab);
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(initialRoute.fileId);
   const [detailsFile, setDetailsFile] = useState<FileSummary | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -73,13 +77,26 @@ export function App() {
     } else {
       params.set('tab', activeTab);
     }
+    if (activeTab === 'chunks' && selectedFileId) {
+      params.set('file', selectedFileId);
+    } else {
+      params.delete('file');
+    }
     const qs = params.toString();
     const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
     window.history.replaceState(null, '', url);
-  }, [activeTab]);
+  }, [activeTab, selectedFileId]);
 
   React.useEffect(() => {
-    const onPopState = () => setActiveTab(getTabFromUrl());
+    const onPopState = () => {
+      const route = getRouteFromUrl();
+      setActiveTab(route.tab);
+      if (route.tab === 'chunks') {
+        setSelectedFileId(route.fileId);
+      } else {
+        setSelectedFileId(null);
+      }
+    };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
@@ -223,7 +240,7 @@ export function App() {
           nodeCount={nodesQuery.data?.length ?? 0}
         />
 
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <main className="flex-1 flex flex-col overflow-hidden" aria-label="Main content">
           {(endpointErrors.length > 0 || authError) && (
             <div className="px-6 pt-4 space-y-2" role="alert">
               {authError && (

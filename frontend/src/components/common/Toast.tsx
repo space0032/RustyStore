@@ -17,7 +17,7 @@ interface ToastProps {
 
 export const ToastContainer: React.FC<ToastProps> = ({ toasts, onDismiss }) => {
   return (
-    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-md w-full pointer-events-none" role="status" aria-live="polite" aria-atomic="false">
+    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-md w-full pointer-events-none" aria-label="Notifications">
       {toasts.map((toast) => {
         const icons = {
           success: <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />,
@@ -33,9 +33,13 @@ export const ToastContainer: React.FC<ToastProps> = ({ toasts, onDismiss }) => {
           info: 'border-sky-500/40 bg-sky-950/80',
         };
 
+        const role = toast.type === 'error' || toast.type === 'warning' ? 'alert' : 'status';
+        const live = toast.type === 'error' || toast.type === 'warning' ? 'assertive' : 'polite';
         return (
           <div
             key={toast.id}
+            role={role}
+            aria-live={live}
             className={`pointer-events-auto flex items-start gap-3 p-4 rounded-xl border shadow-xl backdrop-blur-md transition-all duration-300 animate-in slide-in-from-right ${borderColors[toast.type]}`}
           >
             {icons[toast.type]}

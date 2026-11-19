@@ -78,6 +78,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           disabled={isFetching}
           className="p-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-slate-800 transition-colors disabled:opacity-50"
           title="Manual refresh"
+          aria-label={isFetching ? 'Refreshing data' : 'Refresh data'}
         >
           <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin text-rust-400' : ''}`} />
         </button>
@@ -87,6 +88,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           onClick={onOpenSettings}
           className="p-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-slate-800 transition-colors"
           title="Settings & Connection"
+          aria-label="Open settings"
         >
           <Sliders className="w-4 h-4" />
         </button>

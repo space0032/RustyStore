@@ -15,6 +15,7 @@ import {
   FileCode,
   FileImage,
   FileArchive,
+  X,
 } from 'lucide-react';
 import { FileSummary } from '../types/api';
 import { formatBytes, formatRelativeTime, formatFullDate, truncateUuid } from '../utils/formatters';
@@ -109,11 +110,22 @@ export const FilesView: React.FC<FilesViewProps> = ({
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search files..."
+              placeholder="Search loaded files..."
+              aria-label="Search loaded files"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rust-500 transition-colors"
+              className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rust-500 transition-colors"
             />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-slate-500 hover:text-slate-200"
+                aria-label="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           <button
@@ -133,35 +145,38 @@ export const FilesView: React.FC<FilesViewProps> = ({
             <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px] font-semibold z-10">
               <tr>
                 <th
-                  onClick={() => toggleSort('filename')}
-                  className="py-3 px-4 cursor-pointer hover:text-slate-200 transition-colors"
+                  scope="col"
+                  aria-sort={sortField === 'filename' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                  className="py-3 px-4"
                 >
-                  <div className="flex items-center gap-1.5">
+                  <button type="button" onClick={() => toggleSort('filename')} className="flex items-center gap-1.5 hover:text-slate-200 transition-colors">
                     <span>Filename</span>
-                    <ArrowUpDown className="w-3 h-3 text-slate-500" />
-                  </div>
+                    <ArrowUpDown className="w-3 h-3 text-slate-500" aria-hidden="true" />
+                  </button>
                 </th>
                 <th
-                  onClick={() => toggleSort('total_size')}
-                  className="py-3 px-4 cursor-pointer hover:text-slate-200 transition-colors"
+                  scope="col"
+                  aria-sort={sortField === 'total_size' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                  className="py-3 px-4"
                 >
-                  <div className="flex items-center gap-1.5">
+                  <button type="button" onClick={() => toggleSort('total_size')} className="flex items-center gap-1.5 hover:text-slate-200 transition-colors">
                     <span>Size</span>
-                    <ArrowUpDown className="w-3 h-3 text-slate-500" />
-                  </div>
+                    <ArrowUpDown className="w-3 h-3 text-slate-500" aria-hidden="true" />
+                  </button>
                 </th>
-                <th className="py-3 px-4">Chunks</th>
-                <th className="py-3 px-4">Replicas</th>
+                <th scope="col" className="py-3 px-4">Chunks</th>
+                <th scope="col" className="py-3 px-4">Replicas</th>
                 <th
-                  onClick={() => toggleSort('created_epoch_ms')}
-                  className="py-3 px-4 cursor-pointer hover:text-slate-200 transition-colors"
+                  scope="col"
+                  aria-sort={sortField === 'created_epoch_ms' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                  className="py-3 px-4"
                 >
-                  <div className="flex items-center gap-1.5">
+                  <button type="button" onClick={() => toggleSort('created_epoch_ms')} className="flex items-center gap-1.5 hover:text-slate-200 transition-colors">
                     <span>Committed</span>
-                    <ArrowUpDown className="w-3 h-3 text-slate-500" />
-                  </div>
+                    <ArrowUpDown className="w-3 h-3 text-slate-500" aria-hidden="true" />
+                  </button>
                 </th>
-                <th className="py-3 px-4 text-right">Actions</th>
+                <th scope="col" className="py-3 px-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/50 text-slate-200">
@@ -282,22 +297,40 @@ export const FilesView: React.FC<FilesViewProps> = ({
         </div>
 
         {/* Keyset Cursor Pagination Footer */}
-        <div className="p-3 border-t border-slate-800 bg-slate-900/80 flex items-center justify-between text-xs text-slate-400">
-          <div>
-            Showing <span className="font-semibold text-slate-200">{filteredFiles.length}</span>{' '}
-            of <span className="font-semibold text-slate-200">{files.length}</span> loaded file(s)
-            {searchTerm && <span> (filtered by "{searchTerm}")</span>}
+        <div className="p-3 border-t border-slate-800 bg-slate-900/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-400">
+          <div className="space-y-0.5">
+            <div>
+              Showing <span className="font-semibold text-slate-200">{filteredFiles.length}</span>{' '}
+              of <span className="font-semibold text-slate-200">{files.length}</span> loaded file(s)
+              {searchTerm && <span> (filtered by "{searchTerm}")</span>}
+            </div>
+            {searchTerm && nextCursor && onLoadMore && (
+              <div className="text-[11px] text-amber-300/80">
+                Search applies to loaded files only. Load more to include older objects.
+              </div>
+            )}
           </div>
-          {nextCursor && onLoadMore && (
-            <button
-              onClick={onLoadMore}
-              disabled={loadingMore}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition-colors disabled:opacity-50"
-            >
-              <span>{loadingMore ? 'Loading...' : 'Load More'}</span>
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {searchTerm && nextCursor && onLoadMore && (
+              <button
+                onClick={onLoadMore}
+                disabled={loadingMore}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-200 font-medium transition-colors disabled:opacity-50"
+              >
+                <span>{loadingMore ? 'Loading...' : 'Load more to search'}</span>
+              </button>
+            )}
+            {nextCursor && onLoadMore && (
+              <button
+                onClick={onLoadMore}
+                disabled={loadingMore}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition-colors disabled:opacity-50"
+              >
+                <span>{loadingMore ? 'Loading...' : 'Load More'}</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
