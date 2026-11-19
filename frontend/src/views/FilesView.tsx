@@ -35,6 +35,8 @@ interface FilesViewProps {
   onInspectChunks: (fileId: string) => void;
   onDownloadFile: (file: FileSummary) => void;
   onNotify: (type: 'success' | 'error' | 'info' | 'warning', title: string, message?: string) => void;
+  previewFile?: FileSummary | null;
+  onPreviewFile?: (file: FileSummary | null) => void;
 }
 
 export const FilesView: React.FC<FilesViewProps> = ({
@@ -49,6 +51,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
   onInspectChunks,
   onDownloadFile,
   onNotify,
+  previewFile,
+  onPreviewFile,
 }) => {
   const [loadingAll, setLoadingAll] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -58,8 +62,14 @@ export const FilesView: React.FC<FilesViewProps> = ({
 
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
-  const [previewFile, setPreviewFile] = useState<FileSummary | null>(null);
+  const [localPreviewFile, setLocalPreviewFile] = useState<FileSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<FileSummary | null>(null);
+
+  const activePreviewFile = previewFile ?? localPreviewFile;
+  const setPreview = (file: FileSummary | null) => {
+    if (onPreviewFile) onPreviewFile(file);
+    else setLocalPreviewFile(file);
+  };
 
   const getFileIcon = (filename: string) => {
     const ext = filename.split('.').pop()?.toLowerCase();
@@ -202,7 +212,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
                           <button
                             type="button"
                             className="font-medium text-slate-200 hover:text-rust-400 cursor-pointer truncate block max-w-full text-left focus:outline-none focus:underline"
-                            onClick={() => setPreviewFile(file)}
+                            onClick={() => setPreview(file)}
                             title={`Preview ${file.filename}`}
                           >
                             {file.filename}
@@ -241,7 +251,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
                           <Info className="w-3.5 h-3.5" />
                         </button>
                         <button
-                          onClick={() => setPreviewFile(file)}
+                          onClick={() => setPreview(file)}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
                           title="Preview Object"
                           aria-label={`Preview ${file.filename}`}
@@ -368,9 +378,9 @@ export const FilesView: React.FC<FilesViewProps> = ({
       />
 
       <FilePreviewModal
-        file={previewFile}
-        isOpen={!!previewFile}
-        onClose={() => setPreviewFile(null)}
+        file={activePreviewFile}
+        isOpen={!!activePreviewFile}
+        onClose={() => setPreview(null)}
         onDownload={onDownloadFile}
       />
 

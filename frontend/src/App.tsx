@@ -46,7 +46,7 @@ function toEndpointError(label: string, error: unknown): EndpointError {
   };
 }
 
-function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null; detailsId: string | null } {
+function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null; detailsId: string | null; previewId: string | null } {
   try {
     const params = new URLSearchParams(window.location.search);
     const tabParam = params.get('tab');
@@ -54,11 +54,12 @@ function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null; detailsId: 
       tabParam === 'chunks' || tabParam === 'cluster' || tabParam === 'metrics' ? tabParam : 'files';
     const fileId = params.get('file');
     const detailsId = params.get('details');
-    return { tab, fileId: fileId || null, detailsId: detailsId || null };
+    const previewId = params.get('preview');
+    return { tab, fileId: fileId || null, detailsId: detailsId || null, previewId: previewId || null };
   } catch {
     // ignore
   }
-  return { tab: 'files', fileId: null, detailsId: null };
+  return { tab: 'files', fileId: null, detailsId: null, previewId: null };
 }
 
 export function App() {
@@ -69,6 +70,7 @@ export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialRoute.tab);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(initialRoute.fileId);
   const [detailsFileId, setDetailsFileId] = useState<string | null>(initialRoute.detailsId);
+  const [previewFileId, setPreviewFileId] = useState<string | null>(initialRoute.previewId);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   React.useEffect(() => {
@@ -88,10 +90,15 @@ export function App() {
     } else {
       params.delete('details');
     }
+    if (previewFileId) {
+      params.set('preview', previewFileId);
+    } else {
+      params.delete('preview');
+    }
     const qs = params.toString();
     const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
     window.history.replaceState(null, '', url);
-  }, [activeTab, selectedFileId, detailsFileId]);
+  }, [activeTab, selectedFileId, detailsFileId, previewFileId]);
 
   React.useEffect(() => {
     const onPopState = () => {
@@ -103,6 +110,7 @@ export function App() {
         setSelectedFileId(null);
       }
       setDetailsFileId(route.detailsId);
+      setPreviewFileId(route.previewId);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -158,6 +166,21 @@ export function App() {
       created_epoch_ms: 0,
     } as FileSummary;
   }, [detailsFileId, files]);
+
+  const previewFile = useMemo(() => {
+    if (!previewFileId) return null;
+    const found = files.find((f) => f.file_id === previewFileId);
+    if (found) return found;
+    return {
+      file_id: previewFileId,
+      filename: 'Loading...',
+      total_size: 0,
+      chunk_count: 0,
+      replication_factor: 3,
+      status: 'unknown',
+      created_epoch_ms: 0,
+    } as FileSummary;
+  }, [previewFileId, files]);
 
   const loading = filesQuery.isPending || nodesQuery.isPending || statsQuery.isPending;
   const isFetching =
@@ -331,6 +354,8 @@ export function App() {
               onInspectChunks={handleInspectChunks}
               onDownloadFile={handleDownload}
               onNotify={notify}
+              previewFile={previewFile}
+              onPreviewFile={(file) => setPreviewFileId(file?.file_id ?? null)}
             />
           )}
 
