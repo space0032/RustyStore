@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Search,
   Upload,
@@ -59,6 +59,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
   const [sortField, setSortField] = useState<'filename' | 'total_size' | 'created_epoch_ms'>('created_epoch_ms');
   const [sortAsc, setSortAsc] = useState(false);
   const [uploadHadSuccess, setUploadHadSuccess] = useState(false);
+  const [activeRowIndex, setActiveRowIndex] = useState(-1);
+  const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
 
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -99,12 +101,56 @@ export const FilesView: React.FC<FilesViewProps> = ({
       return sortAsc ? cmp : -cmp;
     });
 
+  useEffect(() => {
+    rowRefs.current = rowRefs.current.slice(0, filteredFiles.length);
+    if (filteredFiles.length === 0) {
+      setActiveRowIndex(-1);
+    } else if (activeRowIndex >= filteredFiles.length) {
+      setActiveRowIndex(filteredFiles.length - 1);
+    }
+  }, [filteredFiles.length, activeRowIndex]);
+
   const toggleSort = (field: 'filename' | 'total_size' | 'created_epoch_ms') => {
     if (sortField === field) {
       setSortAsc(!sortAsc);
     } else {
       setSortField(field);
       setSortAsc(false);
+    }
+  };
+
+  const focusRow = (index: number) => {
+    if (filteredFiles.length === 0) return;
+    const clamped = Math.max(0, Math.min(index, filteredFiles.length - 1));
+    setActiveRowIndex(clamped);
+    rowRefs.current[clamped]?.focus();
+  };
+
+  const handleRowKeyDown = (e: React.KeyboardEvent<HTMLTableRowElement>, index: number, file: FileSummary) => {
+    if (e.target !== e.currentTarget) return;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        focusRow(index + 1);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        focusRow(index - 1);
+        break;
+      case 'Home':
+        e.preventDefault();
+        focusRow(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        focusRow(filteredFiles.length - 1);
+        break;
+      case 'Enter':
+        e.preventDefault();
+        onViewDetails(file);
+        break;
+      default:
+        break;
     }
   };
 
@@ -198,10 +244,19 @@ export const FilesView: React.FC<FilesViewProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-800/50 text-slate-200">
               {filteredFiles.length > 0 ? (
-                filteredFiles.map((file) => (
+                filteredFiles.map((file, index) => (
                   <tr
                     key={file.file_id}
-                    className="hover:bg-slate-800/40 transition-colors group"
+                    ref={(el) => {
+                      rowRefs.current[index] = el;
+                    }}
+                    tabIndex={0}
+                    aria-rowindex={index + 1}
+                    onFocus={() => setActiveRowIndex(index)}
+                    onKeyDown={(e) => handleRowKeyDown(e, index, file)}
+                    className={`hover:bg-slate-800/40 transition-colors group focus:outline-none focus:bg-slate-800/50 focus:ring-1 focus:ring-inset focus:ring-rust-500/40 ${
+                      activeRowIndex === index ? 'bg-slate-800/30' : ''
+                    }`}
                   >
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2.5">
