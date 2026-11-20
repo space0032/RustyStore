@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   Search,
   Upload,
@@ -61,6 +62,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   const [uploadHadSuccess, setUploadHadSuccess] = useState(false);
   const [activeRowIndex, setActiveRowIndex] = useState(-1);
   const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -101,6 +103,13 @@ export const FilesView: React.FC<FilesViewProps> = ({
       return sortAsc ? cmp : -cmp;
     });
 
+  const rowVirtualizer = useVirtualizer({
+    count: filteredFiles.length,
+    getScrollElement: () => tableScrollRef.current,
+    estimateSize: () => 56,
+    overscan: 8,
+  });
+
   useEffect(() => {
     rowRefs.current = rowRefs.current.slice(0, filteredFiles.length);
     if (filteredFiles.length === 0) {
@@ -123,7 +132,10 @@ export const FilesView: React.FC<FilesViewProps> = ({
     if (filteredFiles.length === 0) return;
     const clamped = Math.max(0, Math.min(index, filteredFiles.length - 1));
     setActiveRowIndex(clamped);
-    rowRefs.current[clamped]?.focus();
+    rowVirtualizer.scrollToIndex(clamped, { align: 'auto' });
+    requestAnimationFrame(() => {
+      rowRefs.current[clamped]?.focus();
+    });
   };
 
   const handleRowKeyDown = (e: React.KeyboardEvent<HTMLTableRowElement>, index: number, file: FileSummary) => {
@@ -203,7 +215,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
 
       {/* Files Table Card */}
       <div className="flex-1 min-h-0 bg-slate-900/60 border border-slate-800/80 rounded-2xl flex flex-col overflow-hidden">
-        <div className="overflow-auto flex-1">
+        <div ref={tableScrollRef} className="overflow-auto flex-1">
           <table className="w-full text-left text-xs border-collapse">
             <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px] font-semibold z-10">
               <tr>
@@ -244,9 +256,28 @@ export const FilesView: React.FC<FilesViewProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-800/50 text-slate-200">
               {filteredFiles.length > 0 ? (
-                filteredFiles.map((file, index) => (
+                <>
+                  {rowVirtualizer.getVirtualItems().length > 0 &&
+                    rowVirtualizer.getVirtualItems()[0].start > 0 && (
+                      <tr aria-hidden="true">
+                        <td
+                          colSpan={6}
+                          style={{
+                            height: `${rowVirtualizer.getVirtualItems()[0].start}px`,
+                            padding: 0,
+                            border: 0,
+                          }}
+                        />
+                      </tr>
+                    )}
+                  {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                    const file = filteredFiles[virtualRow.index];
+                    const index = virtualRow.index;
+                    if (!file) return null;
+                    return (
                   <tr
                     key={file.file_id}
+                    data-index={virtualRow.index}
                     ref={(el) => {
                       rowRefs.current[index] = el;
                     }}
@@ -340,7 +371,21 @@ export const FilesView: React.FC<FilesViewProps> = ({
                       </div>
                     </td>
                   </tr>
-                ))
+                    );
+                  })}
+                  {(() => {
+                    const items = rowVirtualizer.getVirtualItems();
+                    if (items.length === 0) return null;
+                    const last = items[items.length - 1];
+                    const endPadding = rowVirtualizer.getTotalSize() - last.end;
+                    if (endPadding <= 0) return null;
+                    return (
+                      <tr aria-hidden="true">
+                        <td colSpan={6} style={{ height: `${endPadding}px`, padding: 0, border: 0 }} />
+                      </tr>
+                    );
+                  })()}
+                </>
               ) : (
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-slate-400">
