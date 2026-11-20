@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Activity,
   ArrowUpRight,
@@ -25,7 +25,7 @@ import {
 import { ParsedPrometheusMetrics } from '../types/api';
 import { formatBytes } from '../utils/formatters';
 
-interface MetricSample {
+export interface MetricSample {
   t: number;
   label: string;
   uploaded: number;
@@ -40,45 +40,17 @@ interface MetricsViewProps {
   loading: boolean;
   onRefresh: () => void;
   onNotify: (type: 'success' | 'error' | 'info' | 'warning', title: string, message?: string) => void;
+  history?: MetricSample[];
 }
 
 export const MetricsView: React.FC<MetricsViewProps> = ({
   metrics,
   loading,
   onNotify,
+  history = [],
 }) => {
   const [copiedRaw, setCopiedRaw] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
-  const [history, setHistory] = useState<MetricSample[]>([]);
-
-  useEffect(() => {
-    if (!metrics || !metrics.available) return;
-    const now = Date.now();
-    const sample: MetricSample = {
-      t: now,
-      label: new Date(now).toLocaleTimeString(),
-      uploaded: metrics.uploadedBytesTotal || 0,
-      downloaded: metrics.downloadedBytesTotal || 0,
-      failures: metrics.uploadFailuresTotal || 0,
-      nodes: metrics.activeStorageNodes || 0,
-      underReplicated: metrics.underReplicatedChunks || 0,
-    };
-    setHistory((prev) => {
-      const last = prev[prev.length - 1];
-      if (
-        last &&
-        last.uploaded === sample.uploaded &&
-        last.downloaded === sample.downloaded &&
-        last.failures === sample.failures &&
-        last.nodes === sample.nodes &&
-        last.underReplicated === sample.underReplicated
-      ) {
-        return prev; // avoid duplicate identical samples
-      }
-      const next = [...prev, sample];
-      return next.slice(-30);
-    });
-  }, [metrics]);
 
   const handleCopyRaw = () => {
     if (!metrics?.rawText) return;

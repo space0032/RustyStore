@@ -13,7 +13,8 @@ import { FileDetailsModal } from './components/files/FileDetailsModal';
 const MetricsView = lazy(() =>
   import('./views/MetricsView').then((module) => ({ default: module.MetricsView }))
 );
-import { FileSummary } from './types/api';
+import { FileSummary, ParsedPrometheusMetrics } from './types/api';
+import type { MetricSample } from './views/MetricsView';
 import {
   checkReadiness,
   downloadFile,
@@ -98,6 +99,7 @@ export function App() {
   const [detailsFileId, setDetailsFileId] = useState<string | null>(initialRoute.detailsId);
   const [previewFileId, setPreviewFileId] = useState<string | null>(initialRoute.previewId);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [metricsHistory, setMetricsHistory] = useState<MetricSample[]>([]);
 
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -171,6 +173,36 @@ export function App() {
     queryFn: getMetrics,
     refetchInterval: pollInterval,
   });
+
+  React.useEffect(() => {
+    const metrics = metricsQuery.data as ParsedPrometheusMetrics | undefined;
+    if (!metrics || !metrics.available) return;
+    const now = Date.now();
+    const sample: MetricSample = {
+      t: now,
+      label: new Date(now).toLocaleTimeString(),
+      uploaded: metrics.uploadedBytesTotal || 0,
+      downloaded: metrics.downloadedBytesTotal || 0,
+      failures: metrics.uploadFailuresTotal || 0,
+      nodes: metrics.activeStorageNodes || 0,
+      underReplicated: metrics.underReplicatedChunks || 0,
+    };
+    setMetricsHistory((prev) => {
+      const last = prev[prev.length - 1];
+      if (
+        last &&
+        last.uploaded === sample.uploaded &&
+        last.downloaded === sample.downloaded &&
+        last.failures === sample.failures &&
+        last.nodes === sample.nodes &&
+        last.underReplicated === sample.underReplicated
+      ) {
+        return prev;
+      }
+      const next = [...prev, sample];
+      return next.slice(-60);
+    });
+  }, [metricsQuery.data]);
 
   const files = useMemo(
     () => filesQuery.data?.pages.flatMap((page) => page.files) ?? [],
@@ -265,6 +297,7 @@ export function App() {
   const handleSaveSettings = (newSettings: AppSettings) => {
     setSettings(newSettings);
     saveSettings(newSettings);
+    setMetricsHistory([]);
     // Settings changes (URL, auth, demo mode) can fundamentally change data; reset pagination.
     void queryClient.resetQueries();
     notify('success', 'Settings Saved', 'Connection parameters have been updated.');
@@ -274,6 +307,7 @@ export function App() {
     const updated = { ...settings, demoMode: !settings.demoMode };
     setSettings(updated);
     saveSettings(updated);
+    setMetricsHistory([]);
     void queryClient.resetQueries();
     notify(
       'info',
@@ -423,6 +457,7 @@ export function App() {
                 loading={metricsQuery.isPending}
                 onRefresh={handleRefresh}
                 onNotify={notify}
+                history={metricsHistory}
               />
             </Suspense>
           )}
