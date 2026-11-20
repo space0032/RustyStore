@@ -33,6 +33,8 @@ interface EndpointError {
   status?: number;
   requestId?: string;
   retryAfter?: number;
+  retrying?: boolean;
+  failureCount?: number;
 }
 
 function toEndpointError(label: string, error: unknown): EndpointError {
@@ -44,6 +46,30 @@ function toEndpointError(label: string, error: unknown): EndpointError {
     requestId: err?.requestId,
     retryAfter: err?.retryAfter,
   };
+}
+
+type QueryLike = {
+  isError: boolean;
+  error: unknown;
+  isFetching: boolean;
+  failureCount: number;
+  failureReason: unknown;
+};
+
+function collectEndpointIssues(queries: Array<{ label: string; q: QueryLike }>): EndpointError[] {
+  const issues: EndpointError[] = [];
+  for (const { label, q } of queries) {
+    if (q.isError && q.error) {
+      issues.push({ ...toEndpointError(label, q.error), retrying: q.isFetching, failureCount: q.failureCount });
+      continue;
+    }
+    // Show automatic retry/backoff progress before a query settles into an error state.
+    if (q.failureCount > 0 && q.isFetching) {
+      const reason = q.failureReason ?? q.error;
+      issues.push({ ...toEndpointError(label, reason), retrying: true, failureCount: q.failureCount });
+    }
+  }
+  return issues;
 }
 
 function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null; detailsId: string | null; previewId: string | null } {
@@ -191,15 +217,16 @@ export function App() {
     readinessQuery.isFetching;
 
   const endpointErrors: EndpointError[] = [
-    filesQuery.error && toEndpointError('Object list', filesQuery.error),
-    nodesQuery.error && toEndpointError('Node list', nodesQuery.error),
-    statsQuery.error && toEndpointError('Cluster stats', statsQuery.error),
-    metricsQuery.error && toEndpointError('Metrics', metricsQuery.error),
-    readinessQuery.data?.status === 'not_ready' && {
-      label: 'Readiness',
-      message: readinessQuery.data.reason ?? 'Coordinator is not ready.',
-    },
-  ].filter((e): e is EndpointError => Boolean(e));
+    ...collectEndpointIssues([
+      { label: 'Object list', q: filesQuery },
+      { label: 'Node list', q: nodesQuery },
+      { label: 'Cluster stats', q: statsQuery },
+      { label: 'Metrics', q: metricsQuery },
+    ]),
+    ...(readinessQuery.data?.status === 'not_ready'
+      ? [{ label: 'Readiness', message: readinessQuery.data.reason ?? 'Coordinator is not ready.' }]
+      : []),
+  ];
 
   const authError = endpointErrors.find((e) => e.status === 401 || e.status === 403);
 
@@ -319,6 +346,11 @@ export function App() {
                   <div className="min-w-0">
                     <span className="font-semibold text-amber-300">{err.label}: </span>
                     <span className="text-amber-100/80">{err.message}</span>
+                    {err.retrying && (
+                      <span className="ml-2 text-sky-200/80">
+                        Retrying automatically{err.failureCount ? ` (attempt ${err.failureCount + 1})` : ''}…
+                      </span>
+                    )}
                     {err.retryAfter != null && (
                       <span className="ml-2 text-amber-200/80">Retry after {err.retryAfter}s.</span>
                     )}
