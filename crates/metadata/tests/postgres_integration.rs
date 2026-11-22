@@ -432,6 +432,12 @@ async fn list_files_paginates_newest_first_and_hides_uploads() {
 
     let search_none = store.list_files(10, None, Some("no-match")).await.unwrap();
     assert!(search_none.is_empty());
+
+    // Search + cursor: only matching rows before cursor are returned.
+    let search_cursor = store.list_files(10, Some(cursor1), Some("file")).await.unwrap();
+    assert_eq!(search_cursor.len(), 2);
+    assert_eq!(search_cursor[0].file_id, file2);
+    assert_eq!(search_cursor[1].file_id, file1);
 }
 
 #[tokio::test]

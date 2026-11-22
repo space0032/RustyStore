@@ -31,7 +31,7 @@ describe('UploadModal', () => {
     getDefaultChunkSizeMock.mockResolvedValue(4);
   });
 
-  it('queues files, shows progress, and cancels a queued item while first upload is in flight', async () => {
+  it('queues files and cancels a queued item while first upload is in flight', async () => {
     const user = userEvent.setup();
     const onSuccess = vi.fn();
     const d1 = deferred<void>();
