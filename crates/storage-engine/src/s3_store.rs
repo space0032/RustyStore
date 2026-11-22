@@ -67,7 +67,8 @@ impl S3ChunkStore {
             .load()
             .await;
 
-        let mut config_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
+        let mut config_builder =
+            aws_sdk_s3::config::Builder::from(&sdk_config).force_path_style(true);
 
         if let (Some(ak), Some(sk)) = (access_key, secret_key) {
             use aws_sdk_s3::config::Credentials;
@@ -93,13 +94,17 @@ impl S3ChunkStore {
         match self.client.head_bucket().bucket(&self.bucket).send().await {
             Ok(_) => Ok(()),
             Err(_) => {
-                self.client
+                let result = self
+                    .client
                     .create_bucket()
                     .bucket(&self.bucket)
                     .send()
-                    .await
-                    .map_err(|e| RustyStoreError::Internal(e.to_string()))?;
-                Ok(())
+                    .await;
+                match result {
+                    Ok(_) => Ok(()),
+                    Err(e) if Self::is_bucket_already_owned(&e) => Ok(()),
+                    Err(e) => Err(RustyStoreError::Internal(e.to_string())),
+                }
             }
         }
     }
@@ -132,9 +137,13 @@ impl S3ChunkStore {
         ranges
     }
 
-    fn is_not_found<E: std::fmt::Display>(error: &E) -> bool {
-        let message = error.to_string();
+    fn is_not_found<E: std::fmt::Debug>(error: &E) -> bool {
+        let message = format!("{error:?}");
         message.contains("NoSuchKey") || message.contains("NotFound") || message.contains("404")
+    }
+
+    fn is_bucket_already_owned<E: std::fmt::Debug>(error: &E) -> bool {
+        format!("{error:?}").contains("BucketAlreadyOwnedByYou")
     }
 
     async fn abort_multipart(&self, key: &str, upload_id: &str) {

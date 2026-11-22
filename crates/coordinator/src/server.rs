@@ -3,6 +3,7 @@
 
 use crate::Coordinator;
 use metadata::MetadataStore;
+use proto::NodeServiceServer;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -100,13 +101,15 @@ impl CoordinatorServer {
             advertise_addr,
         );
         let svc = coordinator.service();
+        let cluster_svc = svc.clone();
 
         let mut builder = tonic::transport::Server::builder();
         if let Some(tls) = common::tls::server_config_from_env()? {
             builder = builder.tls_config(tls)?;
         }
         builder
-            .add_service(svc.into_server())
+            .add_service(cluster_svc.into_server())
+            .add_service(NodeServiceServer::new(svc))
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
                 shutdown,

@@ -45,7 +45,7 @@ Client (HTTP) -> Gateway (Axum) <-> Coordinator (Tonic gRPC) <-> Storage Nodes (
 cp .env.example .env
 
 # 2. Build and start the full stack
-#    (Postgres, MinIO, Coordinator, 3 Storage Nodes, Gateway)
+#    (Postgres, S3-compatible object storage, Coordinator, 3 Storage Nodes, Gateway)
 docker compose up -d
 ```
 
@@ -73,6 +73,19 @@ COORDINATOR_ADDR=127.0.0.1:50051 \
 COORDINATOR_ADDR=127.0.0.1:50051 \
   ./target/release/gateway
 ```
+
+## Web Console (Frontend)
+
+RustyStore includes a modern React 19 + TypeScript + Vite web console located in `frontend/`. It provides object management (streaming upload/download, in-browser previews), an interactive 4 MiB chunk and replica visualizer, cluster node topology, and Prometheus telemetry.
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The web console will be available at `http://localhost:5173`. It features an automatic proxy to the gateway at `http://127.0.0.1:8080`, as well as a toggleable **Demo Mode** with simulated cluster data for offline testing.
+
 
 Service binaries:
 
@@ -225,7 +238,9 @@ scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
 Set `RUSTYSTORE_SOAK_ITERATIONS` to change the automated soak length (default 6,
 maximum 50).
 
-S3/MinIO tests are feature-gated and run when `TEST_S3_ENDPOINT` is set:
+S3 tests are feature-gated and run when `TEST_S3_ENDPOINT` is set. Point it at
+any S3-compatible service; the local stack uses
+`pgsty/silo:RELEASE.2026-11-12T00-00-00Z` (a MinIO-compatible fork):
 
 ```bash
 cargo test -p storage-engine --features s3 --test s3_integration
@@ -257,10 +272,10 @@ SOAK_ITERATIONS=50 SOAK_SIZE_KB=512 scripts/soak.sh
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` with `postgres:15-alpine` and `minio/minio` service
+- `cargo test --workspace` with `postgres:15-alpine` and `pgsty/silo` service
   containers, so the PostgreSQL-backed and full-stack soak tests always run
-- `cargo test -p storage-engine --features s3`, covering S3 unit and MinIO
-  integration tests
+- `cargo test -p storage-engine --features s3`, covering S3 unit and
+  S3-compatible integration tests
 - Docker image builds for the coordinator, storage node, and gateway
 - On `v*` tags, images are published to GHCR as
   `ghcr.io/<owner>/<repo>/{coordinator,storage-node,gateway}` with the tag and

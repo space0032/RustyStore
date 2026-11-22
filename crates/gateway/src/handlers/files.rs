@@ -20,6 +20,15 @@ fn map_coord_error(e: Box<dyn std::error::Error + Send + Sync>) -> GatewayError 
 }
 
 #[derive(Serialize)]
+pub struct ChunkInfoResponse {
+    pub chunk_id: String,
+    pub chunk_index: i64,
+    pub size_bytes: i64,
+    pub sha256_hex: String,
+    pub node_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
 pub struct FileInfoResponse {
     pub file_id: String,
     pub filename: String,
@@ -28,6 +37,7 @@ pub struct FileInfoResponse {
     pub chunk_count: i32,
     pub replication_factor: i32,
     pub status: String,
+    pub chunks: Vec<ChunkInfoResponse>,
 }
 
 #[derive(serde::Deserialize)]
@@ -114,6 +124,17 @@ pub async fn get_file(
         chunk_count: manifest.chunk_count,
         replication_factor: manifest.replication_factor,
         status: "committed".to_string(),
+        chunks: manifest
+            .chunks
+            .into_iter()
+            .map(|c| ChunkInfoResponse {
+                chunk_id: c.chunk_id.to_string(),
+                chunk_index: c.chunk_index,
+                size_bytes: c.size_bytes,
+                sha256_hex: c.sha256_hex,
+                node_ids: c.node_ids.into_iter().map(|id| id.to_string()).collect(),
+            })
+            .collect(),
     }))
 }
 

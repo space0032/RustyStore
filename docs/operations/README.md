@@ -4,7 +4,7 @@
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres minio
+docker compose up -d postgres minio  # minio runs pgsty/silo, a MinIO-compatible fork
 cargo run -p coordinator
 cargo run -p storage-node
 cargo run -p gateway

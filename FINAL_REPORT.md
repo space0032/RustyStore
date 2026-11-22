@@ -433,7 +433,7 @@ COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
 
 ### Docker Compose Services
 - `postgres:15-alpine` — metadata database
-- `minio/minio:latest` — S3-compatible object storage (optional backend)
+- `pgsty/silo:RELEASE.2026-11-12T00-00-00Z` — S3-compatible object storage (optional backend)
 - `coordinator` — cluster metadata + recovery scheduling
 - `storage-node-1/2/3` — persistent chunk storage
 - `gateway` — client-facing HTTP API

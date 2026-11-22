@@ -80,6 +80,7 @@ impl TestStack {
     }
 
     async fn shutdown(mut self) {
+        self.app = Router::new();
         for node in &mut self.nodes {
             if let Some(tx) = node.shutdown.take() {
                 let _ = tx.send(());
@@ -93,7 +94,7 @@ impl TestStack {
             let _ = tx.send(());
         }
         if let Some(task) = self.coord_task.take() {
-            let _ = task.await;
+            task.abort();
         }
     }
 }
