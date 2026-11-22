@@ -39,6 +39,11 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [queueRunning, setQueueRunning] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const runIdRef = useRef(0);
+  const itemsRef = useRef<UploadItem[]>([]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   const isBusy = items.some((i) => i.status === 'uploading');
   const modalRef = useFocusTrap(isOpen && !isBusy);
@@ -81,9 +86,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     setQueueRunning(true);
     const myRun = ++runIdRef.current;
     try {
-      // Process sequentially to avoid overwhelming gateway and to keep UX predictable
+      // Process sequentially to avoid overwhelming gateway and to keep UX predictable.
+      // Read from itemsRef so newly queued/retried items are visible during the loop.
       while (runIdRef.current === myRun) {
-        const next = items.find((i) => i.status === 'queued');
+        const next = itemsRef.current.find((i) => i.status === 'queued');
         if (!next) break;
         const totalChunks = Math.max(1, Math.ceil(next.file.size / chunkSize));
         updateItem(next.id, {
@@ -104,7 +110,17 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         try {
           await handle.promise;
           if (runIdRef.current !== myRun) return;
-          updateItem(next.id, { status: 'done', abort: undefined, progress: { bytesUploaded: next.file.size, totalBytes: next.file.size, percentage: 100, currentChunkEstimate: totalChunks, totalChunksEstimate: totalChunks } });
+          updateItem(next.id, {
+            status: 'done',
+            abort: undefined,
+            progress: {
+              bytesUploaded: next.file.size,
+              totalBytes: next.file.size,
+              percentage: 100,
+              currentChunkEstimate: totalChunks,
+              totalChunksEstimate: totalChunks,
+            },
+          });
           onSuccess(next.file.name);
         } catch (err) {
           if (runIdRef.current !== myRun) return;
@@ -115,11 +131,13 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           updateItem(next.id, { status: cancelled ? 'cancelled' : 'error', error: msg, abort: undefined });
           if (!cancelled) onError(msg);
         }
+        // Yield to let React commit state updates so itemsRef stays current.
+        await Promise.resolve();
       }
     } finally {
       if (runIdRef.current === myRun) setQueueRunning(false);
     }
-  }, [chunkSize, items, onError, onSuccess, queueRunning, updateItem]);
+  }, [chunkSize, onError, onSuccess, queueRunning, updateItem]);
 
   // Kick queue when items change and there is queued work
   useEffect(() => {
