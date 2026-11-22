@@ -424,6 +424,14 @@ async fn list_files_paginates_newest_first_and_hides_uploads() {
         .await
         .unwrap()
         .is_empty());
+
+    // Search filters by filename (case-insensitive substring), still newest-first.
+    let search_page = store.list_files(10, None, Some("file-1")).await.unwrap();
+    assert_eq!(search_page.len(), 1);
+    assert_eq!(search_page[0].filename, "file-1");
+
+    let search_none = store.list_files(10, None, Some("no-match")).await.unwrap();
+    assert!(search_none.is_empty());
 }
 
 #[tokio::test]
