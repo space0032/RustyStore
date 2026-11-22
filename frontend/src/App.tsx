@@ -187,22 +187,24 @@ export function App() {
       nodes: metrics.activeStorageNodes || 0,
       underReplicated: metrics.underReplicatedChunks || 0,
     };
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- append sample derived from external query result
-    setMetricsHistory((prev) => {
-      const last = prev[prev.length - 1];
-      if (
-        last &&
-        last.uploaded === sample.uploaded &&
-        last.downloaded === sample.downloaded &&
-        last.failures === sample.failures &&
-        last.nodes === sample.nodes &&
-        last.underReplicated === sample.underReplicated
-      ) {
-        return prev;
-      }
-      const next = [...prev, sample];
-      return next.slice(-60);
-    });
+    const timer = window.setTimeout(() => {
+      setMetricsHistory((prev) => {
+        const last = prev[prev.length - 1];
+        if (
+          last &&
+          last.uploaded === sample.uploaded &&
+          last.downloaded === sample.downloaded &&
+          last.failures === sample.failures &&
+          last.nodes === sample.nodes &&
+          last.underReplicated === sample.underReplicated
+        ) {
+          return prev;
+        }
+        const next = [...prev, sample];
+        return next.slice(-60);
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [metricsQuery.data]);
 
   const files = useMemo(
