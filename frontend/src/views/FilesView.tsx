@@ -435,14 +435,14 @@ export const FilesView: React.FC<FilesViewProps> = ({
               {searchTerm && <span> (filtered by "{searchTerm}")</span>}
               {searchLoading && <span className="ml-2 text-slate-400">Searching...</span>}
             </div>
-            {searchTerm && nextCursor && (onLoadMore || onLoadAll) && (
+            {!onSearchTermChange && searchTerm && nextCursor && (onLoadMore || onLoadAll) && (
               <div className="text-[11px] text-amber-300/80">
                 Search applies to loaded files only. Load more (or load all) to include older objects.
               </div>
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap justify-end">
-            {searchTerm && nextCursor && onLoadAll && (
+            {!onSearchTermChange && searchTerm && nextCursor && onLoadAll && (
               <button
                 onClick={async () => {
                   try {
