@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.60.0",
-    "@tanstack/react-virtual": "^3.14.26",
     "clsx": "^2.1.1",
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",
