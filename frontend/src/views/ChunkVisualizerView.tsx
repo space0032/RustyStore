@@ -40,6 +40,11 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
   const hasActiveId = !!activeId;
   const selectedInLoaded = activeId ? files.some((f) => f.file_id === activeId) : false;
 
+  const onNotifyRef = React.useRef(onNotify);
+  useEffect(() => {
+    onNotifyRef.current = onNotify;
+  }, [onNotify]);
+
   useEffect(() => {
     if (!activeId) return undefined;
     let active = true;
@@ -52,7 +57,7 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
         const msg = (err as Error).message;
         setFileDetails(null);
         setLoadError(msg);
-        onNotify('error', 'Failed to fetch chunk manifest', msg);
+        onNotifyRef.current('error', 'Failed to fetch chunk manifest', msg);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -60,7 +65,7 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
     return () => {
       active = false;
     };
-  }, [activeId, reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps -- onNotify is a stable-enough toast helper; avoid refetch loops if its identity changes.
+  }, [activeId, reloadToken]);
 
   const handleCopyHash = (hash: string) => {
     navigator.clipboard.writeText(hash);
