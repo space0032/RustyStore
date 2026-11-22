@@ -15,6 +15,7 @@ import {
   FileCode,
   FileImage,
   FileArchive,
+  Loader2,
   X,
 } from 'lucide-react';
 import { FileSummary } from '../types/api';

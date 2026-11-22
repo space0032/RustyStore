@@ -25,6 +25,14 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   const objectUrlRef = useRef<string | null>(null);
   const modalRef = useFocusTrap(isOpen);
   useEscapeClose(isOpen, onClose);
+
+  const ext = file?.filename.split('.').pop()?.toLowerCase() || '';
+  const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
+  const isText = ['txt', 'md', 'json', 'rs', 'toml', 'yaml', 'yml', 'csv', 'log', 'sh', 'sql', 'js', 'ts'].includes(ext);
+  const isVideo = ['mp4', 'webm', 'ogg'].includes(ext);
+  const isAudio = ['mp3', 'wav', 'ogg', 'm4a'].includes(ext);
+  const settings = loadSettings();
+  const demoMediaBlocked = !!(isOpen && file && settings.demoMode && (isVideo || isAudio));
   const canPreviewText = !!(file && isText && file.total_size < 2 * 1024 * 1024);
   const canPreviewMedia = !!(file && (isImage || isVideo || isAudio) && !demoMediaBlocked);
   const shouldLoad = !!(isOpen && file && (canPreviewText || canPreviewMedia));
@@ -33,21 +41,12 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   const effectiveContent = shouldLoad && isText ? content : null;
   const effectiveMediaUrl = shouldLoad && (isImage || isVideo || isAudio) ? mediaUrl : null;
 
-  const ext = file?.filename.split('.').pop()?.toLowerCase() || '';
-  const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
-  const isText = ['txt', 'md', 'json', 'rs', 'toml', 'yaml', 'yml', 'csv', 'log', 'sh', 'sql', 'js', 'ts'].includes(ext);
-  const isVideo = ['mp4', 'webm', 'ogg'].includes(ext);
-  const isAudio = ['mp3', 'wav', 'ogg', 'm4a'].includes(ext);
-
   const revokeUrl = () => {
     if (objectUrlRef.current) {
       window.URL.revokeObjectURL(objectUrlRef.current);
       objectUrlRef.current = null;
     }
   };
-
-  const settings = loadSettings();
-  const demoMediaBlocked = !!(isOpen && file && settings.demoMode && (isVideo || isAudio));
 
   useEffect(() => {
     revokeUrl();
