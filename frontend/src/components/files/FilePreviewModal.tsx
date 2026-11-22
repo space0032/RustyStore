@@ -25,6 +25,13 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   const objectUrlRef = useRef<string | null>(null);
   const modalRef = useFocusTrap(isOpen);
   useEscapeClose(isOpen, onClose);
+  const canPreviewText = !!(file && isText && file.total_size < 2 * 1024 * 1024);
+  const canPreviewMedia = !!(file && (isImage || isVideo || isAudio) && !demoMediaBlocked);
+  const shouldLoad = !!(isOpen && file && (canPreviewText || canPreviewMedia));
+  const effectiveError = demoMediaBlocked ? 'Media playback is unavailable in Demo Mode.' : error;
+  const effectiveLoading = shouldLoad ? loading : false;
+  const effectiveContent = shouldLoad && isText ? content : null;
+  const effectiveMediaUrl = shouldLoad && (isImage || isVideo || isAudio) ? mediaUrl : null;
 
   const ext = file?.filename.split('.').pop()?.toLowerCase() || '';
   const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
@@ -39,27 +46,23 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
     }
   };
 
+  const settings = loadSettings();
+  const demoMediaBlocked = !!(isOpen && file && settings.demoMode && (isVideo || isAudio));
+
   useEffect(() => {
     revokeUrl();
-    if (!isOpen || !file) return undefined;
+    if (!isOpen || !file || demoMediaBlocked) return undefined;
 
     let active = true;
-
-    const settings = loadSettings();
-    if (settings.demoMode && (isVideo || isAudio)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronous demo-mode guard before async fetch
-      setError('Media playback is unavailable in Demo Mode.');
-      setLoading(false);
-      setContent(null);
-      setMediaUrl(null);
-      return undefined;
-    }
-
-    if (isText && file.total_size < 2 * 1024 * 1024) {
-       
+    const startLoad = () => {
       setLoading(true);
       setError(null);
       setContent(null);
+      setMediaUrl(null);
+    };
+
+    if (isText && file.total_size < 2 * 1024 * 1024) {
+      startLoad();
       fetchFileText(file.file_id)
         .then((txt) => {
           if (active) setContent(txt);
@@ -71,10 +74,7 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
           if (active) setLoading(false);
         });
     } else if (isImage || isVideo || isAudio) {
-       
-      setLoading(true);
-      setError(null);
-      setMediaUrl(null);
+      startLoad();
       fetchFileBlobUrl(file.file_id)
         .then((url) => {
           if (!active) {
@@ -91,17 +91,14 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
           if (active) setLoading(false);
         });
     } else {
-      setLoading(false);
-      setError(null);
-      setContent(null);
-      setMediaUrl(null);
+      return undefined;
     }
 
     return () => {
       active = false;
       revokeUrl();
     };
-  }, [isOpen, file, isText, isImage, isVideo, isAudio]);
+  }, [isOpen, file, isText, isImage, isVideo, isAudio, demoMediaBlocked]);
 
   if (!isOpen || !file) return null;
 
@@ -141,15 +138,15 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
 
         {/* Preview Area */}
         <div className="flex-1 overflow-auto p-6 flex flex-col items-center justify-center bg-slate-950/60 min-h-[300px]">
-          {loading ? (
+          {effectiveLoading ? (
             <div className="flex flex-col items-center gap-2 text-slate-400" role="status" aria-live="polite" aria-label="Loading preview">
               <div className="w-6 h-6 border-2 border-rust-500/30 border-t-rust-500 rounded-full animate-spin" aria-hidden="true" />
               <span className="text-xs">Streaming object chunks...</span>
             </div>
           ) : isImage ? (
-            mediaUrl ? (
+            effectiveMediaUrl ? (
               <img
-                src={mediaUrl}
+                src={effectiveMediaUrl}
                 alt={file.filename}
                 className="max-h-[500px] w-auto max-w-full rounded-xl object-contain border border-slate-800 shadow-xl"
                 onError={() => setError('Failed to render image stream')}
@@ -158,27 +155,27 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
               <div className="text-center text-slate-400 text-sm">No image preview available.</div>
             )
           ) : isVideo ? (
-            mediaUrl ? (
+            effectiveMediaUrl ? (
               <video controls className="max-h-[500px] w-full rounded-xl border border-slate-800 shadow-xl">
-                <source src={mediaUrl} />
+                <source src={effectiveMediaUrl} />
                 Your browser does not support video playback.
               </video>
             ) : (
               <div className="text-center text-slate-400 text-sm">No video preview available.</div>
             )
           ) : isAudio ? (
-            mediaUrl ? (
+            effectiveMediaUrl ? (
               <audio controls className="w-full max-w-md">
-                <source src={mediaUrl} />
+                <source src={effectiveMediaUrl} />
                 Your browser does not support audio playback.
               </audio>
             ) : (
               <div className="text-center text-slate-400 text-sm">No audio preview available.</div>
             )
           ) : isText ? (
-            content !== null ? (
+            effectiveContent !== null ? (
               <pre className="w-full h-full p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono-code text-slate-200 overflow-auto whitespace-pre-wrap">
-                {content}
+                {effectiveContent}
               </pre>
             ) : (
               <div className="text-center text-slate-400 text-sm">
@@ -197,10 +194,10 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
             </div>
           )}
 
-          {error && (
+          {effectiveError && (
             <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 px-3 py-2 rounded-xl mt-4" role="alert" aria-live="assertive">
               <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>{error}</span>
+              <span>{effectiveError}</span>
             </div>
           )}
         </div>
