@@ -28,6 +28,7 @@ import {
   AppSettings,
 } from './services/api';
 import { nextId } from './utils/id';
+import { getRouteFromUrl } from './utils/route';
 
 interface EndpointError {
   label: string;
@@ -74,21 +75,7 @@ function collectEndpointIssues(queries: Array<{ label: string; q: QueryLike }>):
   return issues;
 }
 
-function getRouteFromUrl(): { tab: ActiveTab; fileId: string | null; detailsId: string | null; previewId: string | null } {
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const tabParam = params.get('tab');
-    const tab: ActiveTab =
-      tabParam === 'chunks' || tabParam === 'cluster' || tabParam === 'metrics' ? tabParam : 'files';
-    const fileId = params.get('file');
-    const detailsId = params.get('details');
-    const previewId = params.get('preview');
-    return { tab, fileId: fileId || null, detailsId: detailsId || null, previewId: previewId || null };
-  } catch {
-    // ignore
-  }
-  return { tab: 'files', fileId: null, detailsId: null, previewId: null };
-}
+
 
 export function App() {
   const queryClient = useQueryClient();
