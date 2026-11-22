@@ -77,13 +77,29 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
           {detailsQuery.isPending ? (
             <div className="flex flex-col items-center gap-2 py-12 text-slate-400">
               <div className="w-7 h-7 border-2 border-rust-500/30 border-t-rust-500 rounded-full animate-spin" />
-              <span className="text-xs">Loading chunk manifest...</span>
+              <span className="text-xs">
+                {detailsQuery.failureCount > 0
+                  ? `Retrying automatically (attempt ${detailsQuery.failureCount + 1})...`
+                  : 'Loading chunk manifest...'}
+              </span>
+              {detailsQuery.failureCount > 0 && detailsQuery.failureReason && (
+                <span className="text-[11px] text-amber-300/80 max-w-md text-center">
+                  {(detailsQuery.failureReason as Error).message}
+                </span>
+              )}
             </div>
           ) : detailsQuery.error ? (
             <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-3" role="alert" aria-live="assertive">
-              <div className="flex items-center gap-3 text-xs text-rose-200">
+              <div className="flex items-center gap-3 text-xs text-rose-200 min-w-0">
                 <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span>{(detailsQuery.error as Error).message}</span>
+                <div className="min-w-0">
+                  <div className="truncate">{(detailsQuery.error as Error).message}</div>
+                  {(detailsQuery.error as { requestId?: string; retryAfter?: number }).requestId && (
+                    <div className="font-mono text-[10px] text-rose-200/60 mt-0.5">
+                      request {(detailsQuery.error as { requestId?: string }).requestId}
+                    </div>
+                  )}
+                </div>
               </div>
               <button
                 onClick={() => void detailsQuery.refetch()}
