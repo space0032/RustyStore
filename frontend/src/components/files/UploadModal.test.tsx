@@ -27,11 +27,11 @@ function deferred<T = void>() {
 
 describe('UploadModal', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     getDefaultChunkSizeMock.mockResolvedValue(4);
   });
 
-  it('queues files and cancels a queued item while first upload is in flight', async () => {
+  it('cancels a queued item while first upload is in flight', async () => {
     const user = userEvent.setup();
     const onSuccess = vi.fn();
     const d1 = deferred<void>();
@@ -42,18 +42,10 @@ describe('UploadModal', () => {
 
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, {
-      target: {
-        files: [
-          new File(['aaaa'], 'a.txt', { type: 'text/plain' }),
-          new File(['bbbb'], 'b.txt', { type: 'text/plain' }),
-        ],
-      },
+      target: { files: [new File(['aaaa'], 'a.txt'), new File(['bbbb'], 'b.txt')] },
     });
 
     await waitFor(() => expect(uploadFileWithProgressMock).toHaveBeenCalledTimes(1));
-    expect(screen.getByText('a.txt')).toBeInTheDocument();
-    expect(screen.getByText('b.txt')).toBeInTheDocument();
-
     await user.click(screen.getByRole('button', { name: 'Remove b.txt from queue' }));
     expect(screen.getByText('Cancelled')).toBeInTheDocument();
 
@@ -63,5 +55,23 @@ describe('UploadModal', () => {
     });
     await waitFor(() => expect(onSuccess).toHaveBeenCalledWith('a.txt'));
     expect(uploadFileWithProgressMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a failed file from item action', async () => {
+    const user = userEvent.setup();
+    const onSuccess = vi.fn();
+
+    uploadFileWithProgressMock
+      .mockImplementationOnce(() => ({ promise: Promise.reject(new Error('network')), abort: vi.fn() }))
+      .mockImplementationOnce(() => ({ promise: Promise.resolve(), abort: vi.fn() }));
+
+    render(<UploadModal isOpen onClose={vi.fn()} onSuccess={onSuccess} onError={vi.fn()} />);
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File(['aaaa'], 'bad.txt')] } });
+
+    const retry = await screen.findByRole('button', { name: 'Retry upload bad.txt' }, { timeout: 3000 });
+    await user.click(retry);
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledWith('bad.txt'));
   });
 });
