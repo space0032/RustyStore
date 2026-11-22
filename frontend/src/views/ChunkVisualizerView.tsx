@@ -30,8 +30,10 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
 }) => {
   const [fileDetails, setFileDetails] = useState<FileInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [activeChunkIndex, setActiveChunkIndex] = useState<number>(0);
+  const [reloadToken, setReloadToken] = useState(0);
 
   // Prefer explicit selection (including deep links not yet in loaded pages).
   const activeId = selectedFileId ?? files[0]?.file_id ?? null;
@@ -40,10 +42,12 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
   useEffect(() => {
     if (!activeId) {
       setFileDetails(null);
+      setLoadError(null);
       return;
     }
     let active = true;
     setLoading(true);
+    setLoadError(null);
     setFileDetails(null);
     setActiveChunkIndex(0);
     getFile(activeId)
@@ -52,8 +56,10 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
       })
       .catch((err) => {
         if (!active) return;
+        const msg = (err as Error).message;
         setFileDetails(null);
-        onNotify('error', 'Failed to fetch chunk manifest', (err as Error).message);
+        setLoadError(msg);
+        onNotify('error', 'Failed to fetch chunk manifest', msg);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -61,7 +67,7 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
     return () => {
       active = false;
     };
-  }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps -- onNotify is a stable-enough toast helper; avoid refetch loops if its identity changes.
+  }, [activeId, reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps -- onNotify is a stable-enough toast helper; avoid refetch loops if its identity changes.
 
   const handleCopyHash = (hash: string) => {
     navigator.clipboard.writeText(hash);
@@ -312,11 +318,19 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
           </span>
           <p className="text-xs text-slate-500 max-w-sm text-center">
             {activeId
-              ? 'The selected object could not be loaded. It may have been deleted or is not accessible.'
+              ? loadError || 'The selected object could not be loaded. It may have been deleted or is not accessible.'
               : files.length === 0
                 ? 'Upload a file to inspect its chunk manifest and replica placement.'
                 : 'Select an object from the dropdown to view its distributed chunk layout.'}
           </p>
+          {activeId && (
+            <button
+              onClick={() => setReloadToken((t) => t + 1)}
+              className="mt-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
     </div>
