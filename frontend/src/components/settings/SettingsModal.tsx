@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { X, Sliders, Key, Server, RefreshCw, Sparkles, RotateCcw } from 'lucide-react';
-import { useQueryClient } from '@tanstack/react-query';
-import { AppSettings, ConnectionTestResult, testConnection, resetDemoData } from '../../services/api';
+import { AppSettings, ConnectionTestResult, testConnection } from '../../services/api';
 import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
 
 interface SettingsModalProps {
@@ -9,6 +8,7 @@ interface SettingsModalProps {
   onClose: () => void;
   settings: AppSettings;
   onSave: (newSettings: AppSettings) => void;
+  onResetDemo: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -16,8 +16,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   settings,
   onSave,
+  onResetDemo,
 }) => {
-  const queryClient = useQueryClient();
   const [form, setForm] = useState<AppSettings>({ ...settings });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
@@ -26,12 +26,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // The modal stays mounted; refresh the form whenever it opens or settings
   // are changed elsewhere (e.g. the navbar Demo Mode toggle).
+  const settingsKey = JSON.stringify(settings);
   useEffect(() => {
-    if (isOpen) {
-      setForm({ ...settings });
-      setTestResult(null);
-    }
-  }, [isOpen, settings]);
+    if (!isOpen) return;
+    // Reset local draft when modal opens or external settings change.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional sync reset on open/settings identity change
+    setForm(JSON.parse(settingsKey) as AppSettings);
+    setTestResult(null);
+  }, [isOpen, settingsKey]);
 
   if (!isOpen) return null;
 
@@ -102,8 +104,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  resetDemoData();
-                  void queryClient.invalidateQueries();
+                  onResetDemo();
                   setTestResult({ ok: true, message: 'Demo data has been reset to its initial state.' });
                 }}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-medium text-slate-200 transition-colors w-full justify-center"

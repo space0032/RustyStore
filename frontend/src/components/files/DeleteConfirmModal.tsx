@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trash2, AlertTriangle, X, Check } from 'lucide-react';
+import { Trash2, AlertTriangle } from 'lucide-react';
 import { FileSummary } from '../../types/api';
 import { formatBytes } from '../../utils/formatters';
 import { deleteFile } from '../../services/api';

@@ -37,19 +37,12 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
 
   // Prefer explicit selection (including deep links not yet in loaded pages).
   const activeId = selectedFileId ?? files[0]?.file_id ?? null;
+  const hasActiveId = !!activeId;
   const selectedInLoaded = activeId ? files.some((f) => f.file_id === activeId) : false;
 
   useEffect(() => {
-    if (!activeId) {
-      setFileDetails(null);
-      setLoadError(null);
-      return;
-    }
+    if (!activeId) return undefined;
     let active = true;
-    setLoading(true);
-    setLoadError(null);
-    setFileDetails(null);
-    setActiveChunkIndex(0);
     getFile(activeId)
       .then((data) => {
         if (active) setFileDetails(data);
@@ -82,6 +75,13 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
   const chunks = fileDetails?.chunks || [];
   const selectedChunk = chunks[Math.min(activeChunkIndex, Math.max(0, chunks.length - 1))];
 
+  const displayDetails = hasActiveId ? fileDetails : null;
+  const displayLoadError = hasActiveId ? loadError : null;
+  const displayLoading = hasActiveId ? loading : false;
+  const showEmptyState = !hasActiveId;
+  const showLoading = hasActiveId && displayLoading && !displayDetails;
+  const showErrorState = hasActiveId && !displayLoading && !displayDetails;
+
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-950 p-6 space-y-5">
       {/* Header */}
@@ -100,13 +100,19 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
           <label className="text-xs text-slate-400 font-medium">Select Object:</label>
           <select
             value={activeId || ''}
-            onChange={(e) => onSelectFileId(e.target.value)}
+            onChange={(e) => {
+              setLoading(true);
+              setLoadError(null);
+              setFileDetails(null);
+              setActiveChunkIndex(0);
+              onSelectFileId(e.target.value);
+            }}
             className="px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-rust-500 transition-colors max-w-xs"
             aria-label="Select file to visualize"
           >
             {activeId && !selectedInLoaded && (
               <option value={activeId}>
-                {fileDetails?.file_id === activeId ? `${fileDetails.filename} (${formatBytes(fileDetails.total_size)})` : `Selected object (${truncateUuid(activeId)})`}
+                {displayDetails?.file_id === activeId ? `${displayDetails.filename} (${formatBytes(displayDetails.total_size)})` : `Selected object (${truncateUuid(activeId)})`}
               </option>
             )}
             {files.map((f) => (
@@ -118,12 +124,12 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
         </div>
       </div>
 
-      {loading ? (
+      {showLoading ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-slate-400">
           <div className="w-8 h-8 border-2 border-rust-500/30 border-t-rust-500 rounded-full animate-spin" />
           <span className="text-sm font-medium">Retrieving Coordinator Chunk Manifest...</span>
         </div>
-      ) : fileDetails ? (
+      ) : displayDetails ? (
         <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-3 gap-6 overflow-hidden">
           {/* Left Column: Chunk Pipeline & Overview */}
           <div className="lg:col-span-2 flex flex-col space-y-4 overflow-hidden">
@@ -134,11 +140,11 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
                   <FileBox className="w-6 h-6" />
                 </div>
                 <div>
-                  <h3 className="font-semibold text-slate-100">{fileDetails.filename}</h3>
+                  <h3 className="font-semibold text-slate-100">{displayDetails?.filename}</h3>
                   <p className="text-xs text-slate-400">
-                    Total: <span className="text-slate-200 font-mono">{formatBytes(fileDetails.total_size)}</span> • Chunks:{' '}
-                    <span className="text-slate-200 font-mono">{fileDetails.chunk_count}</span> • Chunk Size:{' '}
-                    <span className="text-slate-200 font-mono">{formatBytes(fileDetails.chunk_size || 4194304)}</span>
+                    Total: <span className="text-slate-200 font-mono">{formatBytes(displayDetails?.total_size)}</span> • Chunks:{' '}
+                    <span className="text-slate-200 font-mono">{displayDetails?.chunk_count}</span> • Chunk Size:{' '}
+                    <span className="text-slate-200 font-mono">{formatBytes(displayDetails?.chunk_size || 4194304)}</span>
                   </p>
                 </div>
               </div>
@@ -146,10 +152,10 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>RF = {fileDetails.replication_factor}x</span>
+                  <span>RF = {displayDetails?.replication_factor}x</span>
                 </span>
                 <span className="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300">
-                  Status: {fileDetails.status}
+                  Status: {displayDetails?.status}
                 </span>
               </div>
             </div>
@@ -196,7 +202,7 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
                         </div>
                         <div className="flex items-center gap-1 text-[10px] text-emerald-400">
                           <Check className="w-3 h-3" />
-                          <span>{chunk.node_ids?.length || fileDetails.replication_factor} Replicas</span>
+                          <span>{chunk.node_ids?.length || displayDetails?.replication_factor} Replicas</span>
                         </div>
                       </div>
                     </button>
@@ -308,7 +314,7 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
             </div>
           </div>
         </div>
-      ) : (
+      ) : showErrorState || showEmptyState ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-slate-400">
           <div className="p-4 bg-slate-800/60 rounded-full text-slate-500">
             <Layers className="w-8 h-8" />
@@ -318,21 +324,25 @@ export const ChunkVisualizerView: React.FC<ChunkVisualizerViewProps> = ({
           </span>
           <p className="text-xs text-slate-500 max-w-sm text-center">
             {activeId
-              ? loadError || 'The selected object could not be loaded. It may have been deleted or is not accessible.'
+              ? displayLoadError || 'The selected object could not be loaded. It may have been deleted or is not accessible.'
               : files.length === 0
                 ? 'Upload a file to inspect its chunk manifest and replica placement.'
                 : 'Select an object from the dropdown to view its distributed chunk layout.'}
           </p>
           {activeId && (
             <button
-              onClick={() => setReloadToken((t) => t + 1)}
+              onClick={() => {
+                setLoading(true);
+                setLoadError(null);
+                setReloadToken((t) => t + 1);
+              }}
               className="mt-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors"
             >
               Retry
             </button>
           )}
         </div>
-      )}
+      ) : null}
     </div>
   );
 };

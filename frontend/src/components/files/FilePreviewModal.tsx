@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { X, FileText, Image as ImageIcon, Download, AlertCircle, FileCode } from 'lucide-react';
 import { FileSummary } from '../../types/api';
 import { formatBytes, formatFullDate } from '../../utils/formatters';
-import { downloadFile, fetchFileBlobUrl, fetchFileText, loadSettings } from '../../services/api';
+import { fetchFileBlobUrl, fetchFileText, loadSettings } from '../../services/api';
 import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
 
 interface FilePreviewModalProps {
@@ -40,25 +40,26 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   };
 
   useEffect(() => {
-    if (!isOpen || !file) {
-      revokeUrl();
-      return;
-    }
+    revokeUrl();
+    if (!isOpen || !file) return undefined;
 
     let active = true;
-    setContent(null);
-    setMediaUrl(null);
-    setError(null);
-    revokeUrl();
 
     const settings = loadSettings();
     if (settings.demoMode && (isVideo || isAudio)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronous demo-mode guard before async fetch
       setError('Media playback is unavailable in Demo Mode.');
-      return;
+      setLoading(false);
+      setContent(null);
+      setMediaUrl(null);
+      return undefined;
     }
 
     if (isText && file.total_size < 2 * 1024 * 1024) {
+       
       setLoading(true);
+      setError(null);
+      setContent(null);
       fetchFileText(file.file_id)
         .then((txt) => {
           if (active) setContent(txt);
@@ -70,7 +71,10 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
           if (active) setLoading(false);
         });
     } else if (isImage || isVideo || isAudio) {
+       
       setLoading(true);
+      setError(null);
+      setMediaUrl(null);
       fetchFileBlobUrl(file.file_id)
         .then((url) => {
           if (!active) {
@@ -86,13 +90,18 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
         .finally(() => {
           if (active) setLoading(false);
         });
+    } else {
+      setLoading(false);
+      setError(null);
+      setContent(null);
+      setMediaUrl(null);
     }
 
     return () => {
       active = false;
       revokeUrl();
     };
-  }, [isOpen, file?.file_id, file?.total_size, isText, isImage, isVideo, isAudio]);
+  }, [isOpen, file, isText, isImage, isVideo, isAudio]);
 
   if (!isOpen || !file) return null;
 

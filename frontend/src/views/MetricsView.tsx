@@ -45,7 +45,7 @@ interface MetricsViewProps {
 
 export const MetricsView: React.FC<MetricsViewProps> = ({
   metrics,
-  loading,
+  loading: _loading,
   onNotify,
   history = [],
 }) => {

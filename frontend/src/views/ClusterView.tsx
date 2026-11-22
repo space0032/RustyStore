@@ -1,15 +1,5 @@
 import React from 'react';
-import {
-  Server,
-  HardDrive,
-  ShieldCheck,
-  ShieldAlert,
-  AlertTriangle,
-  Database,
-  Layers,
-  Activity,
-  Cpu,
-} from 'lucide-react';
+import { Server, HardDrive, AlertTriangle, Database, Layers } from 'lucide-react';
 import { ClusterStats, NodeInfo } from '../types/api';
 import { formatBytes, truncateUuid } from '../utils/formatters';
 
@@ -20,7 +10,7 @@ interface ClusterViewProps {
   onRefresh: () => void;
 }
 
-export const ClusterView: React.FC<ClusterViewProps> = ({ stats, nodes, loading }) => {
+export const ClusterView: React.FC<ClusterViewProps> = ({ stats, nodes }) => {
   const totalCapacity = stats?.total_capacity_bytes || 0;
   const totalAvailable = stats?.total_available_bytes || 0;
   const totalUsed = Math.max(0, totalCapacity - totalAvailable);

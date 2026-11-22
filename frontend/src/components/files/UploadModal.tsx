@@ -46,22 +46,25 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   }, [items]);
 
   const isBusy = items.some((i) => i.status === 'uploading');
+  const resetQueue = useCallback(() => {
+    setItems([]);
+    setQueueRunning(false);
+  }, []);
+
+  const handleClose = useCallback(() => {
+    if (isBusy) return;
+    resetQueue();
+    onClose();
+  }, [isBusy, onClose, resetQueue]);
+
   const modalRef = useFocusTrap(isOpen && !isBusy);
-  useEscapeClose(isOpen && !isBusy, onClose);
+  useEscapeClose(isOpen && !isBusy, handleClose);
 
   useEffect(() => {
     if (isOpen) {
       getDefaultChunkSize().then(setChunkSize).catch(() => setChunkSize(4194304));
     }
   }, [isOpen]);
-
-  // Reset queue when closed and idle
-  useEffect(() => {
-    if (!isOpen && !isBusy) {
-      setItems([]);
-      setQueueRunning(false);
-    }
-  }, [isOpen, isBusy]);
 
   const addFiles = useCallback((fileList: FileList | File[]) => {
     const arr = Array.from(fileList);
@@ -145,6 +148,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     const hasQueued = items.some((i) => i.status === 'queued');
     const hasUploading = items.some((i) => i.status === 'uploading');
     if (hasQueued && !hasUploading && !queueRunning) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional queue pump
       void runQueue();
     }
   }, [isOpen, items, queueRunning, runQueue]);
@@ -192,7 +196,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           </div>
           {!isBusy && (
             <button
-              onClick={onClose}
+              onClick={handleClose}
               className="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
               aria-label="Close upload modal"
             >
@@ -366,7 +370,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
             <button
               type="button"
               disabled={isBusy}
-              onClick={onClose}
+              onClick={handleClose}
               className="px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:bg-slate-800 transition-colors disabled:opacity-50"
             >
               {allFinished ? 'Close' : 'Cancel'}

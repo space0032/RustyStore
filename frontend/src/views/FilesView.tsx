@@ -3,7 +3,6 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   Search,
   Upload,
-  RefreshCw,
   Download,
   Eye,
   Info,
@@ -92,17 +91,16 @@ export const FilesView: React.FC<FilesViewProps> = ({
   const filteredFiles = files
     .filter((f) => f.filename.toLowerCase().includes(searchTerm.toLowerCase()))
     .sort((a, b) => {
-      let cmp = 0;
-      if (sortField === 'filename') {
-        cmp = a.filename.localeCompare(b.filename);
-      } else if (sortField === 'total_size') {
-        cmp = a.total_size - b.total_size;
-      } else {
-        cmp = a.created_epoch_ms - b.created_epoch_ms;
-      }
+      const cmp =
+        sortField === 'filename'
+          ? a.filename.localeCompare(b.filename)
+          : sortField === 'total_size'
+            ? a.total_size - b.total_size
+            : a.created_epoch_ms - b.created_epoch_ms;
       return sortAsc ? cmp : -cmp;
     });
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual returns unstable function refs; this component intentionally opts out of memoization constraints.
   const rowVirtualizer = useVirtualizer({
     count: filteredFiles.length,
     getScrollElement: () => tableScrollRef.current,

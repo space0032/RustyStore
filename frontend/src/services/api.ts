@@ -403,7 +403,7 @@ export function uploadFileWithProgress(
         try {
           const res = JSON.parse(xhr.responseText) as UploadResponse;
           resolve(res);
-        } catch (e) {
+        } catch {
           reject(new ApiError('Invalid response from server', xhr.status));
         }
       } else {
@@ -465,7 +465,7 @@ export async function getDefaultChunkSize(): Promise<number> {
   const settings = loadSettings();
   if (settings.demoMode) return 4194304; // 4 MiB
   try {
-    const stats = await getClusterStats();
+    await getClusterStats();
     // The stats don't include chunk size currently, so fall back to 4 MiB.
     // When the backend exposes it, we can read from stats.chunk_size or similar.
     return 4194304;

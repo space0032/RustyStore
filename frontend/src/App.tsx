@@ -23,6 +23,7 @@ import {
   listFiles,
   listNodes,
   loadSettings,
+  resetDemoData,
   saveSettings,
   AppSettings,
 } from './services/api';
@@ -187,6 +188,7 @@ export function App() {
       nodes: metrics.activeStorageNodes || 0,
       underReplicated: metrics.underReplicatedChunks || 0,
     };
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- append sample derived from external query result
     setMetricsHistory((prev) => {
       const last = prev[prev.length - 1];
       if (
@@ -302,6 +304,13 @@ export function App() {
     void queryClient.resetQueries();
     notify('success', 'Settings Saved', 'Connection parameters have been updated.');
   };
+
+  const handleResetDemo = useCallback(() => {
+    resetDemoData();
+    setMetricsHistory([]);
+    void queryClient.resetQueries();
+    notify('info', 'Demo Data Reset', 'Mock files, nodes, and metrics have been restored.');
+  }, [notify, queryClient]);
 
   const handleToggleDemo = () => {
     const updated = { ...settings, demoMode: !settings.demoMode };
@@ -469,6 +478,7 @@ export function App() {
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
         onSave={handleSaveSettings}
+        onResetDemo={handleResetDemo}
       />
 
       <FileDetailsModal
