@@ -1,0 +1,22 @@
+[package]
+name = "rustystore_benchmarks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+criterion = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+tempfile = "3"
+storage-engine = { path = "../crates/storage-engine" }
+tokio = { version = "1", features = ["full", "rt-multi-thread"] }
+hex = "0.4"
+
+[[bench]]
+name = "chunk_hashing"
+harness = false
+
+[[bench]]
+name = "storage_throughput"
+harness = false

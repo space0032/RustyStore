@@ -1,0 +1,24 @@
+[package]
+name = "coordinator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+metadata = { path = "../metadata" }
+proto = { path = "../proto" }
+observability = { path = "../observability" }
+axum = "0.7"
+tonic = { version = "0.11", features = ["tls"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+async-stream = "0.3"
+tower = "0.5"
+tokio-stream = { version = "0.1", features = ["net"] }
+uuid = { version = "1", features = ["v4"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"] }
+chrono = "0.4"
+tracing = "0.1"
+sha2 = "0.10"
+hex = "0.4"

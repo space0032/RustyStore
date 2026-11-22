@@ -1,0 +1,576 @@
+# RustyStore — Final Project Report
+
+A fault-tolerant, horizontally scalable Distributed File Storage System written in Rust.
+Inspired by Google File System, HDFS, and Amazon S3.
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Cargo Workspace Structure](#cargo-workspace-structure)
+4. [Phase-by-Phase Implementation](#phase-by-phase-implementation)
+5. [API Reference](#api-reference)
+6. [Consistency, Durability & Availability Guarantees](#consistency-durability--availability)
+7. [Testing & Benchmarks](#testing--benchmarks)
+8. [Docker Deployment](#docker-deployment)
+9. [Known Limitations](#known-limitations)
+10. [Engineering Achievements](#engineering-achievements)
+
+---
+
+## Overview
+
+RustyStore allows clients to upload, download, retrieve, and manage large files while
+distributing file data across multiple storage nodes. Files are divided into fixed-size
+chunks (default 4 MB), hashed with SHA-256 for integrity, replicated across multiple
+storage nodes (default replication factor N=3), and tracked through a centralized
+metadata coordinator backed by PostgreSQL.
+
+The system detects storage node failures and automatically restores the required
+replication factor using healthy nodes.
+
+---
+
+## Architecture
+
+```text
+Client (HTTP) ──┐
+                ├─ Gateway (Axum, :8080) ──┐
+                                           ├─ gRPC ── Coordinator (:50051) ── PostgreSQL
+Client (HTTP) ──┘                            │                                      │
+                                             ├─ gRPC streaming ── Storage Node 1 ── local disk
+                                             ├─ gRPC streaming ── Storage Node 2 ── local disk
+                                             └─ gRPC streaming ── Storage Node 3 ── local disk
+```
+
+| Component | Responsibility |
+|---|---|
+| **Gateway** | Client-facing HTTP REST API, streaming multipart uploads/downloads, auth |
+| **Coordinator** | Cluster metadata, node health/leases, placement, replication scheduling |
+| **Storage Nodes** | Persistent chunk storage, atomic writes, SHA-256 verification |
+| **PostgreSQL** | File/chunk/replica metadata (not file contents) |
+| **MinIO** | Optional S3-compatible object storage backend (feature-gated) |
+
+Communication:
+- **External (client → gateway)**: HTTP (Axum)
+- **Internal (coordinator ↔ storage nodes)**: Tonic gRPC (Protocol Buffers)
+- **Metadata**: PostgreSQL via SQLx
+
+---
+
+## Cargo Workspace Structure
+
+```
+distributed-storage/
+├── Cargo.toml              # Workspace root (11 members)
+├── rust-toolchain.toml     # Stable, 2024 edition
+├── .env.example            # Environment configuration template
+├── .dockerignore           # Keeps images small and workspace-complete
+├── docker-compose.yml      # Postgres, MinIO, Coordinator, 3 Storage Nodes, Gateway
+├── .github/workflows/ci.yml # fmt, clippy, tests (incl. PostgreSQL), image builds
+├── README.md
+├── crates/
+│   ├── proto/              # Protocol Buffer definitions + generated tonic code
+│   ├── common/             # Shared types, errors, configuration
+│   ├── storage-engine/     # Filesystem chunk store (FsChunkStore), S3 store (feature-gated)
+│   ├── metadata/           # SQLx models + queries against PostgreSQL
+│   ├── coordinator/        # Node registration, health, placement, replication scheduling (+ coordinator binary)
+│   ├── storage-node/       # Tonic gRPC server for chunk store/retrieve/list (+ storage-node binary)
+│   ├── gateway/            # Axum HTTP gateway, streaming upload/download, auth (+ gateway binary)
+│   └── observability/      # Tracing + Prometheus metrics setup
+├── migrations/
+│   └── init/schema.sql     # PostgreSQL initial schema
+├── proto/
+│   └── storage.proto       # Protocol Buffer service definitions
+├── scripts/
+│   ├── crash-node.sh       # Fault injection: simulate node crash
+│   ├── partition-node.sh   # Fault injection: simulate network partition
+│   ├── test-postgres.sh    # Provision disposable Postgres + run metadata integration tests
+│   ├── test-postgres.ps1   # Same, for Windows
+│   ├── e2e-smoke.sh        # End-to-end smoke test script
+│   ├── soak.sh             # HTTP upload/download/delete soak loop
+│   ├── release-check.sh    # Local release gate (Unix)
+│   └── release-check.ps1   # Local release gate (Windows)
+├── tests/
+│   └── src/lib.rs          # Integration tests (5 tests)
+├── benchmarks/
+│   └── benches/            # Criterion benchmarks (SHA-256, storage throughput)
+├── docs/
+│   ├── architecture/overview.md      # 6 Mermaid diagrams
+│   ├── adr/ADR-001-centralized-coordinator.md
+│   ├── operations/README.md
+│   └── api/openapi.yaml              # OpenAPI 3.0 REST API spec
+├── PHASE-1.md through PHASE-45.md    # Phase-by-phase development log
+└── scripts/                    # Fault injection and smoke test scripts
+```
+
+### Crate Dependency Graph (Acyclic)
+
+```
+proto  (leaf)
+  ↑
+common  (proto)
+  ↑
+storage-engine  (common, sha2)
+metadata        (common, sqlx)
+coordinator     (proto, metadata, common, tonic, tokio, tracing)
+storage-node    (proto, storage-engine, metadata, common, tonic, tokio, tracing)
+gateway         (common, proto, coordinator, storage-engine, axum, tower-http, tracing)
+observability   (tracing, prometheus)
+```
+
+Rules: no cycles; `proto` is leaf; `common` has no app crate deps; gateway talks to coordinator via a client module inside `coordinator`.
+
+---
+
+## Phase-by-Phase Implementation
+
+| Phase | Description | Status | Key Files |
+|---|---|---|---|
+| 1 | Architecture & Foundation | Complete | `Cargo.toml`, `proto/storage.proto`, `migrations/init/schema.sql`, `ADR-001` |
+| 2 | Storage Engine | Complete | `crates/storage-engine/src/{lib,chunk_store,fs_store}.rs` |
+| 3 | Gateway | Complete | `crates/gateway/src/{lib,app,routes,handlers/*}.rs` |
+| 4 | Coordinator | Complete | `crates/coordinator/src/{lib,service,placement}.rs` |
+| 5 | Storage Node gRPC | Complete | `crates/storage-node/src/{lib,node,service,server}.rs` |
+| 6 | Replication | Complete | Coordinator `run_recovery_batch()` + `execute_recovery_task()` |
+| 7 | Fault Tolerance | Complete | Semaphore-bounded `JoinSet` recovery, retry logic (5 attempts) |
+| 8 | Hybrid Storage | Complete | `crates/storage-engine/src/s3_store.rs` (feature-gated) |
+| 9 | Testing & Benchmarks | Complete | `tests/src/lib.rs`, `benchmarks/benches/` |
+| 10 | Production Hardening | Complete | `crates/gateway/src/auth.rs`, graceful shutdown, trace/timeout |
+| 11 | Runnable Services & Deployment | Complete | `crates/{coordinator,storage-node,gateway}/src/main.rs`, Dockerfiles |
+| 12 | Metrics Endpoint & Counter Wiring | Complete | `observability`, `/metrics`, gateway counters, coordinator gauges |
+| 13 | Per-IP Rate Limiting | Complete | `gateway::rate_limit`, token bucket middleware, `RATE_LIMIT_*` |
+| 14 | Coordinator HTTP Metrics/Health | Complete | `coordinator::http`, `COORDINATOR_HTTP_ADDR`, `/metrics`, `/health` |
+| 15 | Structured Errors & Request IDs | Complete | `gateway::error` JSON, `gateway::request_id`, `x-request-id` |
+| 16 | Upload Size Limits | Complete | `MAX_UPLOAD_BYTES`, early + streaming enforcement, `413` |
+| 17 | Readiness Probes | Complete | `/api/v1/ready`, coordinator `/ready` with DB ping |
+| 18 | Storage-Node gRPC Integration Tests | Complete | In-process `ChunkService` tests, `retrieve_chunk` hash fix |
+| 19 | Storage-Node HTTP Health/Metrics | Complete | `storage_node::http`, `/health`, `/ready`, `/metrics`, `STORAGE_NODE_HTTP_ADDR` |
+| 20 | Validated Startup Configuration | Complete | `common::config` parsers/validators, fail-fast mains |
+| 21 | Graceful Shutdown (SIGINT/SIGTERM) | Complete | `common::shutdown`, `serve_with_shutdown` in coordinator + storage node |
+| 22 | Storage-Node Transfer Metrics | Complete | `rustystore_storage_{chunks,bytes}_stored_total`, `storage_chunks_deleted_total` |
+| 23 | End-to-End Upload/Download Test + ID Fix | Complete | `gateway/tests/e2e_upload_download.rs`, coordinator-issued upload/file IDs |
+| 24 | File Deletion End to End | Complete | `DeleteFile` RPC, metadata-first delete, best-effort byte removal, 404 mapping |
+| 25 | Coordinator-Authoritative Chunking/Replication | Complete | Chunk size + rf returned by `CreateUploadSession`; gateway honors them |
+| 26 | Request-ID Propagation to gRPC | Complete | Task-local id attached to coordinator/storage-node gRPC metadata, incl. spawned tasks |
+| 27 | Durable Replica Recording on Commit | Complete | `ChunkManifest.node_ids`, atomic chunk+replica insert, empty replica list rejected |
+| 28 | Replication Task Deduplication | Complete | One live task per chunk; stale `in_progress` tasks are failed after 5 minutes |
+| 29 | Orphan-Chunk GC & Stale Upload Reaper | Complete | `ListChunks` RPC, grace-period collection, TTL reaping of abandoned uploads |
+| 30 | PostgreSQL-Backed Integration Tests | Complete | `metadata/tests/postgres_integration.rs`, `scripts/test-postgres.{sh,ps1}` |
+| 31 | Paginated File Listing | Complete | `ListFiles` RPC, keyset cursor, `GET /api/v1/files` |
+| 32 | Graceful HTTP Shutdown, CI, Container Builds | Complete | Shared shutdown fan-out, `.github/workflows/ci.yml`, workspace-complete Dockerfiles |
+| 33 | Recovery Source Failover | Complete | Ordered healthy durable replicas, per-source SHA-256 verification, dead `replication` crate removed |
+| 34 | Recovery Target Failover & Shutdown-Aware Registration | Complete | Recorded target treated as a hint, other healthy non-holders tried, registration retries observe SIGTERM |
+| 35 | Full-Stack & S3 Integration Tests | Complete | Real coordinator + 3 nodes + gateway on PostgreSQL, node-failure download, re-replication, MinIO S3 tests |
+| 36 | Recovery Race, Provenance, Priority & Throttle | Complete | Parallel source race, persisted actual nodes, priority queue, opt-in bandwidth limit |
+| 37 | Coordinator HA-Lite, Gateway Failover & Image Publishing | Complete | PostgreSQL leadership lease, standby coordinators, gateway retry/failover, Compose healthchecks, GHCR publishing |
+| 38 | Legacy RPC & Workspace Cleanup | Complete | Removed AssignReplica/NodeHeartbeat, storage-node service stubs, dead recovery cycle; workspace metadata and Compose cleanup |
+| 39 | Dead RPC, Task Recovery & Docs Cleanup | Complete | Removed `ReplicateChunk` and dead `StorageNode` address API; per-task retry limit; stale recovery task cleanup; corrected operations docs/env/config |
+| 40 | gRPC TLS/mTLS | Complete | `common::tls`, server/client env configuration, `scripts/gen-certs.sh`, `docker-compose.tls.yml` |
+| 41 | Shared Rate Limiting | Complete | `CheckRateLimit` RPC, PostgreSQL token buckets, gateway shared limiter with local fallback, `Retry-After` |
+| 42 | Leader Fencing & Recovery QoS | Complete | Leadership epochs, fenced task claim/complete, takeover cleanup, aggregate throttle, priority aging |
+| 43 | Coordinator Registry & Gateway Discovery | Complete | `coordinator_registry` leases, `ListCoordinators`, gateway refresh loop, `COORDINATOR_ADVERTISE_ADDR` |
+| 44 | S3 Multipart & Retry Hardening | Complete | Adaptive retries/timeouts, 8 MiB multipart parts above 16 MiB, abort-on-failure, error classification |
+| 45 | Fault Injection, Soak & Release Validation | Complete | Full-stack soak cycles, `scripts/soak.sh`, cross-platform `release-check` scripts, CI S3 unit tests |
+
+Phase documentation: `PHASE-1.md` through `PHASE-45.md`
+
+---
+
+## API Reference
+
+### REST Endpoints
+
+| Method | Endpoint | Description | Auth |
+|---|---|---|---|
+| `GET` | `/api/v1/health` | Health check | No |
+| `POST` | `/api/v1/files` | Upload a file (streaming) | Yes\* |
+| `GET` | `/api/v1/files` | List committed files (keyset pagination: `limit`, `cursor`) | Yes\* |
+| `GET` | `/api/v1/files/{file_id}` | Get file metadata | Yes\* |
+| `DELETE` | `/api/v1/files/{file_id}` | Delete a file (metadata + best-effort chunk bytes; 404 if absent) | Yes\* |
+| `GET` | `/api/v1/files/{file_id}/download` | Download a file (streaming) | Yes\* |
+| `GET` | `/api/v1/cluster/nodes` | List storage nodes | Yes\* |
+| `GET` | `/api/v1/cluster/stats` | Get cluster statistics | Yes\* |
+| `GET` | `/metrics` | Prometheus metrics | No |
+
+\* Authentication is configurable via `API_KEY` and `REQUIRE_AUTH` environment variables. Disabled by default for development. `/api/v1/health` and `/metrics` are always public.
+
+### gRPC Services (Internal)
+
+| Service | RPC | Direction |
+|---|---|---|
+| `NodeService` | `Register`, `Heartbeat`, `ReportCapacity`, `Check` | Storage node -> Coordinator |
+| `ChunkService` | `StoreChunk` (streaming), `RetrieveChunk` (streaming), `DeleteChunk`, `ListChunks` (streaming) | Gateway / Coordinator -> Storage node |
+| `ClusterService` | `CreateUploadSession`, `GetChunkPlan`, `CompleteUpload`, `GetManifest`, `DeleteFile`, `ListFiles`, `ListNodes`, `GetStats` | Gateway -> Coordinator |
+
+Full OpenAPI spec: `docs/api/openapi.yaml`
+
+---
+
+## Consistency, Durability & Availability Guarantees
+
+### Consistency
+- **Read-after-write** for committed files via Coordinator metadata
+- `files.status` gate: only `committed` files are readable; incomplete uploads are invisible
+- `chunk_replicas.durable` set true only after fsync + atomic rename + node ack
+
+### Durability
+- A replica is durable only after: SHA-256 verified + `fsync` + atomic rename + gRPC ack
+- Replication complete only when all N replicas acknowledge durable storage
+- **Not zero data loss**: loss of all replicas of a chunk = data loss for that chunk
+
+### Availability
+- **HA-lite coordinators**: multiple coordinator processes share PostgreSQL; a renewable lease elects one leader for background work, and the gateway retries across a coordinator address list
+- **At least one coordinator is required for writes**: leadership is serialized through PostgreSQL, not a consensus protocol
+- Storage nodes continue serving existing chunks during Coordinator outage
+- Recovery scheduling runs on the leader with bounded concurrency (max 4 concurrent)
+
+---
+
+## Testing & Benchmarks
+
+### Tests (113 workspace tests, plus 5 feature-gated S3 tests)
+
+**common** (13 tests):
+1. `parse_value_accepts_valid_integer` — whitespace-trimmed integer parsing
+2. `parse_value_rejects_garbage_with_key_context` — typed error names the key/value
+3. `parse_addr_value_accepts_valid_address` — address parsing
+4. `parse_addr_value_rejects_garbage` — `InvalidAddr` on bad input
+5. `require_positive_rejects_zero_and_negatives` — range validation
+6. `require_non_empty_rejects_blank` — blank-path validation
+7. `current_is_none_outside_scope` — no request id leaks into unrelated tasks
+8. `scope_exposes_id` — scoped id is readable
+9. `nested_scope_overrides_then_restores` — nested scopes restore the outer id
+10. `scope_opt_none_leaves_unset` — `None` does not create a scope
+11. `scope_opt_some_sets_id` — `Some` scopes the id
+12. `absent_variables_mean_plaintext` - missing TLS env leaves gRPC plaintext
+13. `incomplete_server_identity_is_rejected` - a cert without a key fails fast
+
+**storage-engine** (9 default tests + 2 S3 unit tests):
+1. `test_store_and_retrieve_chunk` — round-trip store/retrieve
+2. `test_retrieve_nonexistent_chunk` — NotFound error
+3. `test_integrity_mismatch_on_store` — reject mismatched SHA-256 on write
+4. `test_integrity_mismatch_on_verify` — detect corruption on read
+5. `test_delete_chunk` — delete + idempotent re-delete
+6. `test_streaming_reader` — open chunk reader + verify hash
+7. `test_get_capacity` — disk capacity query
+8. `test_atomic_write_no_partial_visible` — atomic write pattern
+9. `test_list_chunks_skips_temp_files` — listing reports stored chunks with size/mtime and ignores in-progress temp files
+10. `part_ranges_cover_payload_without_gaps` - multipart ranges are contiguous and end on the payload boundary
+11. `part_ranges_handle_empty_and_short_payloads` - empty and sub-part payloads are handled
+
+**coordinator** (28 tests):
+1. `test_place_replicas_selects_distinct_nodes` — N distinct nodes
+2. `test_place_replicas_insufficient_nodes` — error when not enough nodes
+3. `test_place_replicas_excludes_unhealthy_nodes` — skip unhealthy nodes
+4. `test_place_replicas_respects_disk_space` — skip nodes with insufficient disk
+5. `test_place_replicas_excludes_specified_nodes` — respect exclude list
+6. `metrics_render_prometheus_text` — coordinator `/metrics` exposes gauges
+7. `health_returns_ok` — coordinator `/health` returns 200 JSON
+8. `ready_reports_200_when_dependencies_ok` — readiness 200 when DB reachable
+9. `ready_reports_503_when_dependencies_down` — readiness 503 when DB down
+10. `server_serves_metrics_over_http` — real `TcpListener` round-trip serves metrics
+11. `attaches_current_request_id` — client attaches scoped id as gRPC metadata
+12. `omits_header_without_scope` — no metadata when no request id is scoped
+13. `deletes_only_old_unreferenced_chunks` — GC keeps referenced and fresh chunks
+14. `skips_non_uuid_ids` — GC ignores non-UUID filenames
+15. `keeps_chunks_at_exactly_the_cutoff` — grace period is inclusive
+16. `file_cursor_roundtrips` — list cursor preserves the exact timestamp and id
+17. `file_cursor_rejects_garbage` — malformed cursors return `InvalidArgument`
+18. `graceful_shutdown_stops_http_server` — the HTTP probe server drains and releases its port on shutdown
+19. `source_candidates_prefers_recorded_source` — the task's source leads the parallel race, then other replicas
+20. `source_candidates_falls_back_when_recorded_source_unhealthy` — an unhealthy source is omitted for a live replica
+21. `source_candidates_excludes_target_and_non_durable_replicas` — destination and non-durable rows never become sources
+22. `target_candidates_prefers_recorded_target` — the task's target is tried first, then other healthy nodes
+23. `target_candidates_skips_unhealthy_target_and_occupied_nodes` — dead targets and nodes that already hold the chunk are skipped
+24. `target_candidates_empty_when_no_eligible_node` — recovery fails cleanly when every healthy node is a source or holder
+25. `node_endpoint_adds_scheme_only_when_missing` — recovery tolerates node addresses with or without an `http(s)` scheme
+26. `throttle_delay_matches_configured_rate` - recovery bandwidth conversion handles unset, zero, and byte counts
+27. `only_transient_statuses_are_retryable` - failover retries only transient gRPC statuses
+28. `connect_many_rejects_an_empty_address_list` - a gateway without coordinator addresses fails fast
+
+**gateway** (24 tests):
+1. `test_chunk_generator_splits_correctly` — bounded chunk splitting (10,000 → 4096/4096/1808)
+2. `test_chunk_generator_empty_stream` — empty stream yields no chunks
+3. `test_chunk_generator_exact_multiple` — exact multiple yields no trailing empty chunk
+4. `disabled_limiter_allows_all` — rate limiting off is a pass-through
+5. `burst_is_enforced_per_ip` — token bucket exhausts per IP and isolates clients
+6. `not_found_is_404_json` — structured 404 error body
+7. `invalid_argument_is_400_json` — structured 400 with detail
+8. `internal_is_500_and_grpc_is_502` — 500/502 mapping and codes
+9. `payload_too_large_is_413_json` — 413 mapping and code
+10. `generates_uuid_when_absent` — request id generated
+11. `preserves_incoming_id` — client-supplied id reused
+12. `ignores_empty_incoming_id` — empty id replaced
+13. `echoes_request_id_on_response` — middleware echoes id on all responses
+14. `zero_limit_is_unlimited` — `MAX_UPLOAD_BYTES=0` disables enforcement
+15. `at_or_below_limit_is_allowed` — uploads within limit accepted
+16. `above_limit_is_rejected` — uploads over limit rejected
+17. `ready_response_shape` — readiness JSON shape (ready / not_ready)
+18. `ready_is_503_when_coordinator_unreachable` — readiness fails closed
+19. `coordinator_not_found_maps_to_404` — gRPC NotFound becomes a 404
+20. `coordinator_unavailable_maps_to_502` — other gRPC failures become 502
+21. `adds_scheme_only_when_missing` — storage-node gRPC addresses are normalized before connecting
+22. `parses_multiple_coordinators_and_normalizes_schemes` - comma-separated `COORDINATOR_ADDRS` entries are trimmed and normalized
+23. `falls_back_to_single_coordinator_addr` - `COORDINATOR_ADDR` remains the single-address fallback
+24. `rejects_an_empty_address_list` - an empty coordinator list is a startup error
+
+**observability** (1 test):
+1. `metrics_render_contains_counters_and_is_idempotent` — exposition contains counters/gauges; registration is idempotent
+
+**storage-node** (13 tests: 5 gRPC + 6 HTTP + 2 registration):
+1. `grpc_store_retrieve_delete_roundtrip` — real `ChunkServiceClient` store/retrieve/delete over a `TcpListener`, asserts storage counters advance
+2. `grpc_store_rejects_sha_mismatch` — declared SHA-256 that does not match the bytes is rejected
+3. `grpc_retrieve_missing_chunk_not_found` — unknown chunk returns gRPC `NotFound`
+4. `grpc_list_chunks_reports_stored_chunks` — streaming `ListChunks` returns stored ids, sizes, and mtimes
+5. `metrics_render_prometheus_text` — storage node `/metrics` exposes Prometheus text including storage counters
+6. `health_returns_ok` — `/health` returns 200 with `service: storage-node`
+7. `ready_reports_200_when_storage_ok` — `/ready` 200 when the volume is usable
+8. `ready_reports_503_when_storage_down` — `/ready` 503 when the volume probe fails
+9. `server_serves_health_over_http` — real `TcpListener` round-trip serves `/health`
+10. `graceful_shutdown_stops_server` — server stops accepting after the shutdown future resolves
+11. `graceful_shutdown_stops_http_server` — the HTTP probe server drains and releases its port on shutdown
+12. `registration_stops_when_shutdown_already_requested` — a pre-set shutdown flag skips coordinator registration
+13. `registration_stops_when_shutdown_arrives_while_retrying` — a signal interrupts the registration retry loop
+
+**metadata (13 tests, require `TEST_DATABASE_URL`)**:
+1. `complete_upload_records_chunks_and_durable_replicas` — chunk + durable replica rows committed atomically, manifest readable, no under-replication
+2. `deleting_file_cascades_chunks_replicas_sessions_and_tasks` — FK cascades remove chunks, replicas, upload sessions, and replication tasks
+3. `replication_task_dedup_and_stale_in_progress` — active-task dedup, abandoned `in_progress` expiry, completed tasks inactive
+4. `claim_replication_task_marks_in_progress_once` — `FOR UPDATE SKIP LOCKED` hands a task out exactly once
+5. `existing_chunk_ids_and_stale_upload_reaping` — reference lookup + TTL reaping removes abandoned uploads but keeps committed files
+6. `list_files_paginates_newest_first_and_hides_uploads` — keyset pages have no gaps or duplicates and exclude in-progress uploads
+7. `replication_task_priority_order_and_actual_nodes` - higher-priority tasks are claimed first and completed rows record the actual source/target
+8. `leadership_lease_allows_one_coordinator_and_expires` - one leader renews, a standby is blocked, expiry allows takeover, and the old leader is rejected
+9. `replication_task_retry_limit_and_stale_cleanup` - retries stop at the task's `max_attempts`, and abandoned `in_progress` tasks are failed for rescheduling
+10. `new_leader_fails_tasks_claimed_by_older_epochs` - takeover fails stale in-progress tasks and the new leader can reclaim them
+11. `replication_task_priority_ages_to_avoid_starvation` - waiting tasks gain priority until claimed
+12. `shared_rate_limit_buckets_enforce_burst_per_key` - PostgreSQL buckets are shared across gateway processes
+13. `coordinator_registry_reports_only_live_rows` - registration, renewal, live filtering, and stale-row cleanup
+
+These run only when `TEST_DATABASE_URL` (or `DATABASE_URL`) points at a disposable database; otherwise they return early. Provision one with `scripts/test-postgres.sh` / `scripts/test-postgres.ps1`.
+
+**integration** (12 tests):
+1. `test_full_chunk_lifecycle` — store, retrieve, verify, delete
+2. `test_placement_with_healthy_nodes` — distinct node selection
+3. `test_placement_excludes_unhealthy_and_insufficient_disk` — placement constraints
+4. `test_duplicate_chunk_dedup_by_hash` — content-addressed dedup
+5. `test_corrupted_chunk_detection` — integrity mismatch on verify
+6. `upload_then_download_roundtrip` — gateway HTTP upload through a fake coordinator into a real storage node, HTTP download (multi-chunk, byte-for-byte), then delete (metadata + chunk bytes removed, follow-up requests 404); the fake returns a 2 MB chunk size and rf 2 (proving the gateway honors coordinator settings), records replicas from the gateway's `node_ids` (failing if absent), and asserts every coordinator call, including those from the spawned download task, carries the HTTP `x-request-id`
+7. `full_stack_upload_download_list_delete` — real PostgreSQL + coordinator + 3 storage nodes + gateway: four chunks, 8 replica files, listing, byte-for-byte download, delete, 404
+8. `download_survives_a_storage_node_failure` — stops the first replica of a chunk and downloads from the other
+9. `concurrent_uploads_are_all_committed` — four parallel HTTP uploads commit and appear in one listing page
+10. `recovery_replaces_a_failed_replica` — expires a replica node's lease, marks its replica non-durable, and verifies the detector/scheduler copies the chunk to the spare node and records the actual source/target
+11. `gateway_fails_over_between_coordinators` - the gateway keeps serving after its active coordinator stops by retrying the standby coordinator
+12. `soak_repeated_upload_download_delete_cycles` - repeated multi-chunk upload/download/delete cycles verify bytes, replica counts, 404s, and no leaked chunk files
+
+**storage-engine S3 (3 integration tests, require `--features s3` and `TEST_S3_ENDPOINT`)**:
+1. `s3_store_roundtrip_and_integrity` — store, exists, retrieve, verify, list, delete, idempotent re-delete
+2. `s3_store_rejects_corrupted_uploads` — a mismatched SHA-256 is rejected before the object is written
+3. `s3_store_multipart_roundtrip` - a 17 MiB object uploads through three multipart parts and downloads byte-for-byte
+
+The full-stack tests share the PostgreSQL gate and run against a real coordinator and nodes; the soak test length is controlled by `RUSTYSTORE_SOAK_ITERATIONS`. CI also provides MinIO and runs both the S3 unit tests and the integration target.
+
+### Benchmarks (Criterion)
+
+**chunk_hashing**:
+- `sha256_1kb`, `sha256_4mb`, `sha256_8mb`, `sha256_random_1mb`
+
+**storage_throughput**:
+- `store_write_4kb`, `store_write_1mb`, `store_write_4mb`
+- `store_read_4mb`, `store_delete_4mb`
+
+Run with: `cargo bench`
+
+### Fault Injection Scripts
+- `scripts/crash-node.sh` — stop a storage node, wait for lease expiry, restart, verify recovery
+- `scripts/partition-node.sh` — isolate a node from network, wait for lease expiry, reconnect
+- `scripts/e2e-smoke.sh` — start stack, run migrations, build services
+- `scripts/test-postgres.sh` / `.ps1` — provision a disposable PostgreSQL, run metadata integration tests, remove the container
+
+---
+
+## Docker Deployment
+
+```bash
+# 1. Copy environment config
+cp .env.example .env
+
+# 2. Build and start the full stack
+docker compose up -d
+```
+
+The coordinator applies the schema automatically on startup (embedded,
+idempotent DDL), so no separate migration step is required.
+
+Each service also has a standalone Dockerfile:
+
+```bash
+docker build -f crates/coordinator/Dockerfile -t rustystore-coordinator .
+docker build -f crates/storage-node/Dockerfile -t rustystore-storage-node .
+docker build -f crates/gateway/Dockerfile -t rustystore-gateway .
+```
+
+The build copies the complete Cargo workspace, and `.dockerignore` excludes
+`target`, `.git`, `data`, and the host toolchain file. GitHub Actions builds all
+three images on every push and pull request, and publishes version tags to GHCR
+as `ghcr.io/<owner>/<repo>/{coordinator,storage-node,gateway}`. Compose
+healthchecks gate startup on coordinator readiness; storage nodes and the
+gateway wait for it before registering or accepting traffic.
+
+### Local run (service binaries)
+
+```bash
+cargo build --release
+
+DATABASE_URL=postgres://rustystore:rustystore@localhost:5432/rustystore \
+  ./target/release/coordinator
+COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/storage-node
+COORDINATOR_ADDR=127.0.0.1:50051 ./target/release/gateway
+```
+
+### Docker Compose Services
+- `postgres:15-alpine` — metadata database
+- `minio/minio:latest` — S3-compatible object storage (optional backend)
+- `coordinator` — cluster metadata + recovery scheduling
+- `storage-node-1/2/3` — persistent chunk storage
+- `gateway` — client-facing HTTP API
+
+Compose starts one coordinator by default. To exercise failover, add a second
+coordinator service against the same PostgreSQL database and set
+`COORDINATOR_ADDRS=coordinator-a:50051,coordinator-b:50051` on the gateway.
+
+---
+
+## Known Limitations
+
+1. **HA-lite, not consensus** - coordinators share PostgreSQL and a renewable lease elects one background worker. Leadership epochs fence stale workers, but there is no quorum; at least one coordinator must be reachable for new writes, and promotion happens after lease expiry rather than through an instant election.
+2. **S3 backend feature-gated** - `cargo build --features storage-engine/s3` required. Multipart uploads start above 16 MiB; the filesystem backend remains the default.
+3. **Recovery bandwidth throttling is opt-in** - `RECOVERY_BANDWIDTH_BYTES_PER_SEC` bounds each transfer and `RECOVERY_AGGREGATE_BYTES_PER_SEC` bounds total recovery traffic; both default to unlimited.
+4. **Recovery priority is a single integer** - derived from the number of missing replicas, with time-based aging (`RECOVERY_PRIORITY_AGING_SECS`) but no per-file priority.
+5. **Shared rate limiting falls back locally** - gateway replicas share PostgreSQL buckets through the coordinator; if the coordinator is unreachable, each gateway enforces its own bucket until connectivity returns.
+6. **Gateway HTTP is plaintext** - gRPC supports TLS/mTLS, but client-facing HTTP should terminate TLS at a reverse proxy.
+7. **PostgreSQL integration tests skip without a database** - locally they need `TEST_DATABASE_URL` and a disposable database (`scripts/test-postgres.{sh,ps1}`); CI provides one through a service container, so they always run there.
+8. **Recovery target failover is sequential** - sources race in parallel, but targets are tried one at a time to avoid duplicate replicas; completed tasks record the nodes that actually served the transfer.
+9. **In-flight recovery after lease loss** - a former leader may finish transfers started before its lease expired. Fenced completion prevents metadata corruption, but unreferenced chunk bytes may remain for orphan GC.
+10. **Storage nodes default to their bind address** - set `ADVERTISED_ADDR` when `NODE_ADDR` is not reachable by peers (Docker Compose sets it).
+11. **Coordinator discovery needs a reachable advertised address** - set `COORDINATOR_ADVERTISE_ADDR` when the bind address is `0.0.0.0` or differs from the peer-facing address.
+12. **Local soak coverage is short by default** - the automated full-stack soak runs six iterations (maximum 50); use `scripts/soak.sh` for longer deployment-level runs.
+
+---
+
+## Engineering Achievements
+
+- **Multi-crate Cargo workspace** with acyclic dependency graph (11 crates)
+- **Runnable service binaries** — coordinator, storage-node, gateway with env config + JSON tracing
+- **Self-migrating coordinator** — embedded idempotent schema, no external migration step
+- **Node registration + heartbeat** — client-streaming register, auto-reconnecting bidi heartbeat lease renewal
+- **Atomic chunk writes** — temp file → fsync → rename (no partial reads)
+- **SHA-256 integrity** verified on write AND read
+- **Lease-based health** — heartbeat ≠ durability proof; nodes unhealthy only after lease expiry
+- **Streaming gRPC** — 4–8 MB chunks in 64 KB frames, no unbounded messages
+- **Bounded concurrency recovery** — semaphore-limited `JoinSet` (max 4 concurrent)
+- **`FOR UPDATE SKIP LOCKED`** — atomic replication task claiming
+- **Pluggable storage tier** — filesystem (default) + S3/MinIO (feature-gated)
+- **Authentication middleware** — Bearer token validation
+- **Graceful shutdown** — all services handle SIGINT and SIGTERM (Docker/Kubernetes) and drain in-flight work; the coordinator and storage node fan one signal out to both their gRPC and HTTP probe servers
+- **Observability** — tracing (JSON), Prometheus metrics, request tracing
+- **Metrics wired end to end** — `/metrics` endpoint, gateway byte/failure counters, coordinator node/under-replication gauges, storage-node chunk/byte store and delete counters
+- **Per-IP rate limiting** — token-bucket middleware with `429`/`Retry-After`, health and metrics exempt
+- **All services expose Prometheus metrics** — gateway and storage node on `/metrics`, coordinator on a dedicated HTTP port
+- **Structured JSON errors & request correlation** — stable error codes plus `x-request-id` on every response, propagated into coordinator and storage-node gRPC metadata
+- **Request-ID propagation** — a task-local id is attached to outgoing gRPC calls and re-scoped across `tokio::spawn` boundaries (upload replica fan-out, download streaming)
+- **Replica metadata committed with files** — uploads record durable replicas in the same transaction as the chunk and file rows, so manifests are downloadable and deletion can locate chunk bytes
+- **Replication task deduplication** — one live task per chunk prevents detector-tick task storms, with stale in-progress tasks failed so recovery cannot wedge
+- **Orphan-chunk GC** — coordinator lists chunks on healthy nodes, subtracts metadata references, and reclaims bytes older than a grace period; abandoned uploads are reaped on a TTL
+- **PostgreSQL-backed integration tests** — real SQL paths for replica commit, FK cascades, task dedup/priority claiming, GC reaping, and file pagination, provisioned through a disposable Docker database
+- **Paginated file listing** — `GET /api/v1/files` with opaque keyset cursors (timestamp + id), stable newest-first ordering, and a committed-only filter
+- **CI pipeline** — GitHub Actions checks formatting and clippy with warnings denied, runs all workspace tests against PostgreSQL and MinIO service containers, and builds every service image
+- **Working container builds** — Dockerfiles copy the complete workspace (including `benchmarks/` and `tests/` members) and a `.dockerignore` keeps contexts small; all three images build locally and in CI
+- **Upload size limits** — `MAX_UPLOAD_BYTES` enforced from content-length and during streaming (`413`)
+- **Liveness vs readiness** — `/health` for liveness, `/ready` (DB/coordinator/storage probes) for orchestrators
+- **Fail-fast configuration** — invalid or out-of-range env values stop startup instead of silently weakening limits
+- **End-to-end upload/download test** — gateway HTTP → fake coordinator → real storage node → HTTP download, no PostgreSQL required; caught a coordinator-issued ID mismatch that would have failed every real upload
+- **File deletion** — coordinator removes metadata first (cascade), gateway then deletes chunk bytes from replicas best-effort; missing files return 404
+- **Coordinator-authoritative chunking** — the coordinator supplies chunk size and replication factor; the gateway uses them, so manifests match actual placement
+- **Recovery failover** — recovery races all healthy durable sources in parallel and uses the first SHA-256-verified response, cancelling the rest; the recorded target is a hint, with other healthy non-holders tried sequentially when it is unhealthy or refuses the write; completed tasks record the nodes that actually served the transfer
+- **Priority-aware recovery queue** - tasks carry a priority derived from the number of missing replicas and are claimed highest-priority first
+- **Opt-in recovery bandwidth throttle** - `RECOVERY_BANDWIDTH_BYTES_PER_SEC` limits each source and target transfer without changing the default unlimited path
+- **Shutdown-aware registration** — a storage node waiting for the coordinator stops retrying on SIGINT/SIGTERM and drains its HTTP probes instead of blocking shutdown
+- **Dead-code removal** — the unused `crates/replication` placeholder is gone; the coordinator owns the scheduler (workspace now 11 crates)
+- **Full-stack integration tests** — real coordinator, three storage nodes, PostgreSQL, and the gateway router exercise multi-chunk upload/download/delete, replica failover during download, concurrent uploads, and automatic re-replication after lease expiry
+- **S3/MinIO integration tests** — feature-gated round-trip and integrity tests run in CI against a MinIO service container
+- **Coordinator HA-lite** - a renewable PostgreSQL lease elects one coordinator for lease monitoring, under-replication detection, recovery scheduling, and orphan GC; standbys serve reads and writes
+- **Gateway coordinator failover** - `COORDINATOR_ADDRS` accepts a comma-separated list; transient gRPC failures rotate to the next coordinator and retry
+- **Leadership observability** - `rustystore_coordinator_is_leader` exposes which coordinator owns background work
+- **Compose readiness** - coordinator, storage-node, and gateway healthchecks gate startup, and storage nodes advertise a reachable `ADVERTISED_ADDR`
+- **GHCR image publishing** - version tags publish coordinator, storage-node, and gateway images with buildx cache reuse
+- **Legacy RPC cleanup** - storage nodes expose only `ChunkService`; the unused `AssignReplica`/`NodeHeartbeat` RPCs, storage-node `NodeService`/`ClusterService` stubs, and the dead single-cycle recovery path are gone
+- **Consistent workspace metadata** - every crate inherits version, edition 2024, and `rust-version = "1.85"` from `[workspace.package]`; the duplicate benchmark release profile is removed
+- **Compose cleanup** - dropped the obsolete `version` field and unused storage-node `DATABASE_URL`
+- **Dead RPC/API cleanup** - removed the unimplemented `ReplicateChunk` RPC and the unused storage-node `register`/address API; storage nodes expose only the operations they serve
+- **Recovery task correctness** - retries now honor each task's `max_attempts`, and abandoned `in_progress` tasks are failed by the leader so fresh work can be scheduled
+- **Operations cleanup** - corrected health/metrics ports and migration guidance, and removed unused `PROMETHEUS_ADDR`/lease env vars, the dead `common::Config` struct, and `envy`
+- **gRPC TLS/mTLS** - shared server/client helpers, certificate validation at startup, generated test certs, and a Compose TLS overlay
+- **Shared rate limiting** - PostgreSQL token buckets behind a coordinator RPC, with local fallback and `Retry-After` responses
+- **Leader fencing** - leadership epochs prevent stale coordinators from claiming, failing, or completing recovery tasks after lease loss
+- **Recovery QoS** - aggregate bandwidth limits and priority aging keep recovery from starving new work or saturating the cluster
+- **Coordinator discovery** - live registry leases plus `ListCoordinators` let gateways expand their endpoint pool from one bootstrap address
+- **S3 hardening** - adaptive retries, bounded timeouts, multipart uploads, abort-on-failure, and outage-aware error classification
+- **Release validation** - automated full-stack soak cycles, an HTTP soak script, and cross-platform release-check scripts aligned with CI
+- **113 workspace tests plus 5 feature-gated S3 tests** across common config/TLS, storage engine, coordinator, gateway, storage node
+  (in-process gRPC + HTTP), observability, integration, full-stack, S3, and PostgreSQL-backed metadata
+- **Criterion benchmarks** for SHA-256 throughput and storage I/O
+
+---
+
+## Build & Test Commands
+
+```bash
+# Build all crates
+cargo build --workspace
+
+# Build with S3 backend
+cargo build --workspace --features storage-engine/s3
+
+# Run all tests
+cargo test --workspace
+
+# Run the PostgreSQL-backed metadata tests (Docker required)
+scripts/test-postgres.sh        # or scripts/test-postgres.ps1 on Windows
+
+# Run clippy (zero warnings)
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Check formatting
+cargo fmt --all -- --check
+
+# Run the full local release gate
+scripts/release-check.sh        # or scripts/release-check.ps1 on Windows
+
+# Soak a running stack over HTTP
+SOAK_ITERATIONS=50 SOAK_SIZE_KB=512 scripts/soak.sh
+
+# Run benchmarks
+cargo bench
+
+# Build container images
+docker build -f crates/coordinator/Dockerfile -t rustystore-coordinator .
+docker build -f crates/storage-node/Dockerfile -t rustystore-storage-node .
+docker build -f crates/gateway/Dockerfile -t rustystore-gateway .
+
+# Start infrastructure with Docker Compose
+docker compose up -d
+```
+
+---
+
+## License
+
+MIT
+
+---
+
+*Generated as part of the RustyStore distributed storage system project. All phases (1-45) implemented and committed.*

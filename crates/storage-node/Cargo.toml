@@ -1,0 +1,25 @@
+[package]
+name = "storage-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+storage-engine = { path = "../storage-engine" }
+metadata = { path = "../metadata" }
+proto = { path = "../proto" }
+observability = { path = "../observability" }
+tonic = { version = "0.11", features = ["tls"] }
+axum = "0.7"
+futures-util = "0.3"
+async-stream = "0.3"
+tokio = { version = "1", features = ["full", "sync"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+sha2 = "0.10"
+hex = "0.4"

@@ -1,0 +1,36 @@
+[package]
+name = "gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+proto = { path = "../proto" }
+coordinator = { path = "../coordinator" }
+storage-engine = { path = "../storage-engine" }
+observability = { path = "../observability" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace", "timeout"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+futures-util = "0.3"
+http = "1"
+mime = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
+tonic = { version = "0.11", features = ["tls"] }
+async-stream = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+storage-node = { path = "../storage-node" }
+async-trait = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }

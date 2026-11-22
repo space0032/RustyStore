@@ -1,0 +1,434 @@
+openapi: 3.0.3
+info:
+  title: RustyStore API
+  description: |
+    Distributed File Storage System API.
+    
+    Files are divided into fixed-size chunks, hashed with SHA-256,
+    replicated across storage nodes, and tracked through a centralized
+    metadata coordinator backed by PostgreSQL.
+  version: 0.1.0
+  contact:
+    name: RustyStore Maintainers
+    email: support@rustystore.example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: files
+    description: File upload, download, and metadata operations
+  - name: cluster
+    description: Cluster health and statistics
+  - name: health
+    description: Health check
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Returns the health status of the gateway service.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  service:
+                    type: string
+                    example: "gateway"
+
+  /api/v1/ready:
+    get:
+      tags: [health]
+      summary: Readiness check
+      description: |
+        Reports whether the gateway can serve traffic: it probes the
+        coordinator and returns `503` when unreachable. Always public.
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: Ready to serve traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ready"
+        '503':
+          description: Not ready (dependency unavailable)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "not_ready"
+                  reason:
+                    type: string
+                    example: "coordinator unavailable"
+
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition format. Exposes gateway counters
+        (`rustystore_uploaded_bytes_total`, `rustystore_downloaded_bytes_total`,
+        `rustystore_upload_failures_total`) and coordinator gauges
+        (`rustystore_active_storage_nodes`, `rustystore_under_replicated_chunks`).
+        This endpoint is always public (no auth).
+      operationId: getMetrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/v1/files:
+    get:
+      tags: [files]
+      summary: List files
+      description: |
+        Lists committed files newest-first using opaque keyset pagination.
+        Pass the returned `next_cursor` as the `cursor` query parameter to
+        fetch the next page; the field is omitted on the last page.
+      operationId: listFiles
+      parameters:
+        - in: query
+          name: limit
+          description: Page size (default 50, max 200)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - in: query
+          name: cursor
+          description: Opaque cursor from the previous page
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A page of committed files
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file_id:
+                          type: string
+                          format: uuid
+                        filename:
+                          type: string
+                        total_size:
+                          type: integer
+                        chunk_count:
+                          type: integer
+                        replication_factor:
+                          type: integer
+                        status:
+                          type: string
+                          example: committed
+                        created_epoch_ms:
+                          type: integer
+                  next_cursor:
+                    type: string
+        '400':
+          description: Invalid limit or cursor
+        '502':
+          description: Coordinator error
+    post:
+      tags: [files]
+      summary: Upload a file
+      description: |
+        Upload a file using streaming multipart or raw body.
+        The file is divided into fixed-size chunks (default 4 MB),
+        each chunk is SHA-256 hashed and replicated across N storage
+        nodes (default N=3).
+        
+        Headers:
+        - `x-filename`: Original filename
+        - `content-length`: Total file size in bytes
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file_id:
+                    type: string
+                    format: uuid
+                  upload_id:
+                    type: string
+                    format: uuid
+                  chunk_size:
+                    type: integer
+                    example: 4194304
+                  chunk_count:
+                    type: integer
+                    example: 3
+                  replication_factor:
+                    type: integer
+                    example: 3
+        '400':
+          description: Invalid request
+        '502':
+          description: Coordinator or storage node error
+
+  /api/v1/files/{file_id}:
+    get:
+      tags: [files]
+      summary: Get file metadata
+      description: Returns file metadata including chunk count, locations, and replication status.
+      operationId: getFile
+      parameters:
+        - in: path
+          name: file_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: File UUID
+      responses:
+        '200':
+          description: File metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file_id:
+                    type: string
+                    format: uuid
+                  filename:
+                    type: string
+                  total_size:
+                    type: integer
+                  chunk_size:
+                    type: integer
+                  chunk_count:
+                    type: integer
+                  replication_factor:
+                    type: integer
+                  status:
+                    type: string
+                    example: "committed"
+        '404':
+          description: File not found
+
+    delete:
+      tags: [files]
+      summary: Delete a file
+      description: Deletes the file and chunk metadata, then removes the chunk bytes from every known storage node. Byte deletion is best-effort; failures leave unreferenced chunks that are safe to garbage-collect.
+      operationId: deleteFile
+      parameters:
+        - in: path
+          name: file_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: File UUID
+      responses:
+        '200':
+          description: File deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "deleted"
+                  file_id:
+                    type: string
+                    format: uuid
+                  chunks:
+                    type: integer
+                    description: Number of chunk records removed
+                  chunk_replicas_deleted:
+                    type: integer
+                    description: Replica bytes removed from storage nodes
+                  chunk_replicas_failed:
+                    type: integer
+                    description: Replica deletions that failed (best-effort)
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/files/{file_id}/download:
+    get:
+      tags: [files]
+      summary: Download a file
+      description: |
+        Download a file by streaming chunks from storage nodes in order.
+        Each chunk's SHA-256 is verified during download. If a replica
+        is unavailable, the next healthy replica is used automatically.
+      operationId: downloadFile
+      parameters:
+        - in: path
+          name: file_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: File UUID
+      responses:
+        '200':
+          description: File content stream
+          headers:
+            content-type:
+              schema:
+                type: string
+                example: "application/octet-stream"
+            content-length:
+              schema:
+                type: integer
+            x-file-id:
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: File not found
+        '502':
+          description: Chunk unavailable on all replicas
+
+  /api/v1/cluster/nodes:
+    get:
+      tags: [cluster]
+      summary: List storage nodes
+      description: Returns all registered storage nodes with their health and capacity information.
+      operationId: listNodes
+      responses:
+        '200':
+          description: List of storage nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        node_id:
+                          type: string
+                          format: uuid
+                        addr:
+                          type: string
+                        grpc_addr:
+                          type: string
+                        healthy:
+                          type: boolean
+                        available_bytes:
+                          type: integer
+                        capacity_bytes:
+                          type: integer
+
+  /api/v1/cluster/stats:
+    get:
+      tags: [cluster]
+      summary: Get cluster statistics
+      description: Returns aggregate cluster statistics including node count, capacity, and replication status.
+      operationId: getStats
+      responses:
+        '200':
+          description: Cluster statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_nodes:
+                    type: integer
+                  healthy_nodes:
+                    type: integer
+                  total_capacity_bytes:
+                    type: integer
+                  total_available_bytes:
+                    type: integer
+                  total_files:
+                    type: integer
+                  total_chunks:
+                    type: integer
+                  under_replicated_chunks:
+                    type: integer
+
+components:
+  schemas:
+    Error:
+      type: object
+      description: |
+        Structured gateway error. Every response also carries an `x-request-id`
+        header (echoing the client value or a generated UUID) for correlation.
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable error code
+              enum: [not_found, invalid_argument, payload_too_large, internal, upstream_error]
+              example: not_found
+            message:
+              type: string
+              example: "not found"
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "API Key"
+      description: API key for authentication. Set via API_KEY environment variable.
+
+security:
+  - bearerAuth: []

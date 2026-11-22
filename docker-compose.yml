@@ -1,0 +1,167 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: rustystore
+      POSTGRES_PASSWORD: rustystore
+      POSTGRES_DB: rustystore
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rustystore -d rustystore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: crates/coordinator/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://rustystore:rustystore@postgres:5432/rustystore
+      COORDINATOR_ADDR: 0.0.0.0:50051
+      COORDINATOR_ADVERTISE_ADDR: coordinator:50051
+      CHUNK_SIZE_BYTES: "4194304"
+      REPLICATION_FACTOR: "3"
+      ORPHAN_GC_INTERVAL_SECS: "300"
+      ORPHAN_GRACE_SECS: "3600"
+      UPLOAD_SESSION_TTL_SECS: "86400"
+      RUST_LOG: info
+    ports:
+      - "50051:50051"
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  storage-node-1:
+    build:
+      context: .
+      dockerfile: crates/storage-node/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    environment:
+      COORDINATOR_ADDR: coordinator:50051
+      NODE_ADDR: 0.0.0.0:50051
+      ADVERTISED_ADDR: storage-node-1:50051
+      STORAGE_PATH: /data/chunks
+      STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
+      RUST_LOG: info
+    ports:
+      - "50052:50051"
+      - "8082:8082"
+    volumes:
+      - sn1_data:/data/chunks
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  storage-node-2:
+    build:
+      context: .
+      dockerfile: crates/storage-node/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    environment:
+      COORDINATOR_ADDR: coordinator:50051
+      NODE_ADDR: 0.0.0.0:50051
+      ADVERTISED_ADDR: storage-node-2:50051
+      STORAGE_PATH: /data/chunks
+      STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
+      RUST_LOG: info
+    ports:
+      - "50053:50051"
+      - "8083:8082"
+    volumes:
+      - sn2_data:/data/chunks
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  storage-node-3:
+    build:
+      context: .
+      dockerfile: crates/storage-node/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    environment:
+      COORDINATOR_ADDR: coordinator:50051
+      NODE_ADDR: 0.0.0.0:50051
+      ADVERTISED_ADDR: storage-node-3:50051
+      STORAGE_PATH: /data/chunks
+      STORAGE_NODE_HTTP_ADDR: 0.0.0.0:8082
+      RUST_LOG: info
+    ports:
+      - "50054:50051"
+      - "8084:8082"
+    volumes:
+      - sn3_data:/data/chunks
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: crates/gateway/Dockerfile
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    environment:
+      COORDINATOR_ADDRS: coordinator:50051
+      GATEWAY_ADDR: 0.0.0.0:8080
+      CHUNK_SIZE_BYTES: "4194304"
+      REPLICATION_FACTOR: "3"
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  postgres_data:
+  minio_data:
+  sn1_data:
+  sn2_data:
+  sn3_data:
