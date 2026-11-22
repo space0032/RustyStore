@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useVirtualizer } from '@tanstack/react-virtual';
+
 import {
   Search,
   Upload,
@@ -108,22 +108,33 @@ export const FilesView: React.FC<FilesViewProps> = ({
       return sortAsc ? cmp : -cmp;
     });
 
-  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual returns unstable function refs; this component intentionally opts out of memoization constraints.
-  const rowVirtualizer = useVirtualizer({
-    count: filteredFiles.length,
-    getScrollElement: () => tableScrollRef.current,
-    estimateSize: () => 56,
-    overscan: 8,
-  });
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(560);
+  const rowHeight = 56;
+  const overscan = 8;
+  const handleTableScroll = (e: React.UIEvent<HTMLDivElement>) => setScrollTop(e.currentTarget.scrollTop);
 
   useEffect(() => {
-    rowRefs.current = rowRefs.current.slice(0, filteredFiles.length);
-    if (filteredFiles.length === 0) {
-      setActiveRowIndex(-1);
-    } else if (activeRowIndex >= filteredFiles.length) {
-      setActiveRowIndex(filteredFiles.length - 1);
-    }
-  }, [filteredFiles.length, activeRowIndex]);
+    const el = tableScrollRef.current;
+    if (!el) return undefined;
+    const update = () => setViewportHeight(el.clientHeight || 560);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const totalRows = filteredFiles.length;
+  const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+  const endIndex = Math.min(totalRows, startIndex + visibleCount);
+  const visibleRows = filteredFiles.slice(startIndex, endIndex);
+  const topPadding = startIndex * rowHeight;
+  const bottomPadding = Math.max(0, (totalRows - endIndex) * rowHeight);
+
+  useEffect(() => {
+    rowRefs.current = [];
+  }, [filteredFiles.length, searchTerm, sortField, sortAsc]);
 
   const toggleSort = (field: 'filename' | 'total_size' | 'created_epoch_ms') => {
     if (sortField === field) {
@@ -134,38 +145,46 @@ export const FilesView: React.FC<FilesViewProps> = ({
     }
   };
 
-  const focusRow = (index: number) => {
-    if (filteredFiles.length === 0) return;
-    const clamped = Math.max(0, Math.min(index, filteredFiles.length - 1));
-    setActiveRowIndex(clamped);
-    rowVirtualizer.scrollToIndex(clamped, { align: 'auto' });
-    requestAnimationFrame(() => {
-      rowRefs.current[clamped]?.focus();
-    });
-  };
-
   const handleRowKeyDown = (e: React.KeyboardEvent<HTMLTableRowElement>, index: number, file: FileSummary) => {
     if (e.target !== e.currentTarget) return;
+    const focusIndex = (target: number) => {
+      if (filteredFiles.length === 0) return;
+      const clamped = Math.max(0, Math.min(filteredFiles.length - 1, target));
+      setActiveRowIndex(clamped);
+      const el = tableScrollRef.current;
+      if (el) {
+        const top = clamped * rowHeight;
+        const bottom = top + rowHeight;
+        if (top < el.scrollTop) el.scrollTop = top;
+        else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
+      }
+      requestAnimationFrame(() => rowRefs.current[clamped]?.focus());
+    };
+
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        focusRow(index + 1);
+        focusIndex(index + 1);
         break;
       case 'ArrowUp':
         e.preventDefault();
-        focusRow(index - 1);
+        focusIndex(index - 1);
         break;
       case 'Home':
         e.preventDefault();
-        focusRow(0);
+        focusIndex(0);
         break;
       case 'End':
         e.preventDefault();
-        focusRow(filteredFiles.length - 1);
+        focusIndex(filteredFiles.length - 1);
         break;
       case 'Enter':
         e.preventDefault();
         onViewDetails(file);
+        break;
+      case ' ':
+        e.preventDefault();
+        setPreview(file);
         break;
       default:
         break;
@@ -224,7 +243,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
 
       {/* Files Table Card */}
       <div className="flex-1 min-h-0 bg-slate-900/60 border border-slate-800/80 rounded-2xl flex flex-col overflow-hidden">
-        <div ref={tableScrollRef} className="overflow-auto flex-1">
+        <div ref={tableScrollRef} onScroll={handleTableScroll} className="overflow-auto flex-1">
           <table className="w-full text-left text-xs border-collapse">
             <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px] font-semibold z-10">
               <tr>
@@ -266,27 +285,16 @@ export const FilesView: React.FC<FilesViewProps> = ({
             <tbody className="divide-y divide-slate-800/50 text-slate-200">
               {filteredFiles.length > 0 ? (
                 <>
-                  {rowVirtualizer.getVirtualItems().length > 0 &&
-                    rowVirtualizer.getVirtualItems()[0].start > 0 && (
-                      <tr aria-hidden="true">
-                        <td
-                          colSpan={6}
-                          style={{
-                            height: `${rowVirtualizer.getVirtualItems()[0].start}px`,
-                            padding: 0,
-                            border: 0,
-                          }}
-                        />
-                      </tr>
-                    )}
-                  {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                    const file = filteredFiles[virtualRow.index];
-                    const index = virtualRow.index;
-                    if (!file) return null;
+                  {topPadding > 0 && (
+                    <tr aria-hidden="true">
+                      <td colSpan={6} style={{ height: `${topPadding}px`, padding: 0, border: 0 }} />
+                    </tr>
+                  )}
+                  {visibleRows.map((file, visibleIndex) => {
+                    const index = startIndex + visibleIndex;
                     return (
                   <tr
                     key={file.file_id}
-                    data-index={virtualRow.index}
                     ref={(el) => {
                       rowRefs.current[index] = el;
                     }}
@@ -382,18 +390,11 @@ export const FilesView: React.FC<FilesViewProps> = ({
                   </tr>
                     );
                   })}
-                  {(() => {
-                    const items = rowVirtualizer.getVirtualItems();
-                    if (items.length === 0) return null;
-                    const last = items[items.length - 1];
-                    const endPadding = rowVirtualizer.getTotalSize() - last.end;
-                    if (endPadding <= 0) return null;
-                    return (
-                      <tr aria-hidden="true">
-                        <td colSpan={6} style={{ height: `${endPadding}px`, padding: 0, border: 0 }} />
-                      </tr>
-                    );
-                  })()}
+                  {bottomPadding > 0 && (
+                    <tr aria-hidden="true">
+                      <td colSpan={6} style={{ height: `${bottomPadding}px`, padding: 0, border: 0 }} />
+                    </tr>
+                  )}
                 </>
               ) : (
                 <tr>
