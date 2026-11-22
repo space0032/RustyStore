@@ -429,10 +429,11 @@ export const FilesView: React.FC<FilesViewProps> = ({
         {/* Keyset Cursor Pagination Footer */}
         <div className="p-3 border-t border-slate-800 bg-slate-900/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-400">
           <div className="space-y-0.5">
-            <div>
+            <div aria-live="polite">
               Showing <span className="font-semibold text-slate-200">{filteredFiles.length}</span>{' '}
               of <span className="font-semibold text-slate-200">{files.length}</span> loaded file(s)
               {searchTerm && <span> (filtered by "{searchTerm}")</span>}
+              {searchLoading && <span className="ml-2 text-slate-400">Searching...</span>}
             </div>
             {searchTerm && nextCursor && (onLoadMore || onLoadAll) && (
               <div className="text-[11px] text-amber-300/80">
