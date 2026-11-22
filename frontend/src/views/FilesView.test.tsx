@@ -60,4 +60,20 @@ describe('FilesView', () => {
     expect(onSearchTermChange).toHaveBeenCalled();
     expect(onSearchTermChange.mock.calls.map((c) => c[0]).join('')).toContain('abc');
   });
+
+  it('hides local-search load-all hint when server search is controlled', () => {
+    render(
+      <FilesView
+        {...baseProps()}
+        searchTerm="report"
+        onSearchTermChange={vi.fn()}
+        nextCursor="cursor-1"
+        onLoadMore={vi.fn()}
+        onLoadAll={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(/Search applies to loaded files only/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Load all to search/i })).not.toBeInTheDocument();
+  });
 });
