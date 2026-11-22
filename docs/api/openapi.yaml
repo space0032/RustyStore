@@ -126,6 +126,11 @@ paths:
           description: Opaque cursor from the previous page
           schema:
             type: string
+        - in: query
+          name: search
+          description: Case-insensitive filename substring filter
+          schema:
+            type: string
       responses:
         '200':
           description: A page of committed files

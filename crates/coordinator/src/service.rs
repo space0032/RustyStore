@@ -1286,11 +1286,15 @@ impl ClusterService for CoordinatorService {
                 .ok_or_else(|| Status::invalid_argument("invalid cursor"))?;
             Some((created_at, file_id))
         };
+        let search = {
+            let s = req.search.trim();
+            if s.is_empty() { None } else { Some(s) }
+        };
 
         // Fetch one extra row so we know whether a next page exists.
         let rows = self
             .store
-            .list_files(i64::from(limit) + 1, after)
+            .list_files(i64::from(limit) + 1, after, search)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

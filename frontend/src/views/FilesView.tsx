@@ -37,6 +37,9 @@ interface FilesViewProps {
   onNotify: (type: 'success' | 'error' | 'info' | 'warning', title: string, message?: string) => void;
   previewFile?: FileSummary | null;
   onPreviewFile?: (file: FileSummary | null) => void;
+  searchTerm?: string;
+  onSearchTermChange?: (value: string) => void;
+  searchLoading?: boolean;
 }
 
 export const FilesView: React.FC<FilesViewProps> = ({
@@ -53,9 +56,14 @@ export const FilesView: React.FC<FilesViewProps> = ({
   onNotify,
   previewFile,
   onPreviewFile,
+  searchTerm: controlledSearchTerm,
+  onSearchTermChange,
+  searchLoading = false,
 }) => {
   const [loadingAll, setLoadingAll] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [localSearchTerm, setLocalSearchTerm] = useState('');
+  const searchTerm = controlledSearchTerm ?? localSearchTerm;
+  const setSearchTerm = onSearchTermChange ?? setLocalSearchTerm;
   const [sortField, setSortField] = useState<'filename' | 'total_size' | 'created_epoch_ms'>('created_epoch_ms');
   const [sortAsc, setSortAsc] = useState(false);
   const [uploadHadSuccess, setUploadHadSuccess] = useState(false);
@@ -89,7 +97,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   };
 
   const filteredFiles = files
-    .filter((f) => f.filename.toLowerCase().includes(searchTerm.toLowerCase()))
+    .filter((f) => (onSearchTermChange ? true : f.filename.toLowerCase().includes(searchTerm.toLowerCase())))
     .sort((a, b) => {
       const cmp =
         sortField === 'filename'
@@ -180,12 +188,15 @@ export const FilesView: React.FC<FilesViewProps> = ({
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search loaded files..."
-              aria-label="Search loaded files"
+              placeholder={onSearchTermChange ? "Search all files..." : "Search loaded files..."}
+              aria-label={onSearchTermChange ? "Search all files by name" : "Search loaded files"}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rust-500 transition-colors"
             />
+            {searchLoading && (
+              <Loader2 className="w-4 h-4 absolute right-8 top-1/2 -translate-y-1/2 text-slate-500 animate-spin" aria-hidden="true" />
+            )}
             {searchTerm && (
               <button
                 type="button"

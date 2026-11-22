@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, lazy, Suspense } from 'react';
+import React, { useState, useCallback, useMemo, lazy, Suspense, useEffect } from 'react';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Navbar } from './components/layout/Navbar';
 import { Sidebar, ActiveTab } from './components/layout/Sidebar';
@@ -77,6 +77,15 @@ function collectEndpointIssues(queries: Array<{ label: string; q: QueryLike }>):
 
 
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 export function App() {
   const queryClient = useQueryClient();
   const [settings, setSettings] = useState<AppSettings>(loadSettings());
@@ -139,9 +148,12 @@ export function App() {
     queryFn: checkReadiness,
     refetchInterval: pollInterval,
   });
+  const [fileSearch, setFileSearch] = useState('');
+  const debouncedFileSearch = useDebouncedValue(fileSearch.trim(), 300);
+
   const filesQuery = useInfiniteQuery({
-    queryKey: ['files'],
-    queryFn: ({ pageParam }) => listFiles(50, pageParam),
+    queryKey: ['files', debouncedFileSearch],
+    queryFn: ({ pageParam }) => listFiles(50, pageParam, debouncedFileSearch || undefined),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
     refetchInterval: pollInterval,
@@ -418,6 +430,9 @@ export function App() {
               onNotify={notify}
               previewFile={previewFile}
               onPreviewFile={(file) => setPreviewFileId(file?.file_id ?? null)}
+              searchTerm={fileSearch}
+              onSearchTermChange={setFileSearch}
+              searchLoading={filesQuery.isFetching && !filesQuery.isFetchingNextPage}
             />
           )}
 

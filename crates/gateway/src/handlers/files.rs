@@ -44,6 +44,7 @@ pub struct FileInfoResponse {
 pub struct ListFilesQuery {
     pub limit: Option<i32>,
     pub cursor: Option<String>,
+    pub search: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -81,7 +82,7 @@ pub async fn list_files(
 
     let mut client = state.coord_client().await?;
     let page = client
-        .list_files(limit, query.cursor.unwrap_or_default())
+        .list_files(limit, query.cursor.unwrap_or_default(), query.search)
         .await
         .map_err(map_coord_error)?;
 

@@ -234,10 +234,12 @@ impl ClusterService for FakeCoordinator {
         } else {
             req.limit.min(200)
         } as usize;
+        let search = req.search.trim().to_lowercase();
         let state = self.state.lock().await;
         let mut files: Vec<FileSummary> = state
             .files
             .values()
+            .filter(|f| search.is_empty() || f.upload.filename.to_lowercase().contains(&search))
             .map(|f| FileSummary {
                 file_id: f.upload.file_id.to_string(),
                 filename: f.upload.filename.clone(),

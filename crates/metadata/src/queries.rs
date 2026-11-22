@@ -569,13 +569,38 @@ impl MetadataStore {
     /// `after` is `(created_at, file_id)` from the last row of the previous
     /// page; pass `None` for the first page. Ordering includes the id so files
     /// created in the same instant paginate deterministically.
+    /// `search` optionally filters by filename using a case-insensitive substring match.
     pub async fn list_files(
         &self,
         limit: i64,
         after: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+        search: Option<&str>,
     ) -> sqlx::Result<Vec<FileRow>> {
-        match after {
-            Some((created_at, file_id)) => {
+        let search_pattern = search
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{}%", s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+
+        match (after, search_pattern.as_deref()) {
+            (Some((created_at, file_id)), Some(pattern)) => {
+                sqlx::query_as::<_, FileRow>(
+                    r#"
+                    SELECT * FROM files
+                    WHERE status = 'committed'
+                      AND filename ILIKE $1 ESCAPE '\'
+                      AND (created_at, file_id) < ($2, $3)
+                    ORDER BY created_at DESC, file_id DESC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(pattern)
+                .bind(created_at)
+                .bind(file_id)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            }
+            (Some((created_at, file_id)), None) => {
                 sqlx::query_as::<_, FileRow>(
                     r#"
                     SELECT * FROM files
@@ -591,7 +616,22 @@ impl MetadataStore {
                 .fetch_all(&self.pool)
                 .await
             }
-            None => {
+            (None, Some(pattern)) => {
+                sqlx::query_as::<_, FileRow>(
+                    r#"
+                    SELECT * FROM files
+                    WHERE status = 'committed'
+                      AND filename ILIKE $1 ESCAPE '\'
+                    ORDER BY created_at DESC, file_id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(pattern)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            }
+            (None, None) => {
                 sqlx::query_as::<_, FileRow>(
                     r#"
                     SELECT * FROM files

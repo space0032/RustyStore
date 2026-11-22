@@ -175,15 +175,21 @@ export async function checkHealth(): Promise<HealthResponse> {
 
 export async function listFiles(
   limit = 50,
-  cursor?: string
+  cursor?: string,
+  search?: string
 ): Promise<FileListResponse> {
   const settings = loadSettings();
+  const normalizedSearch = search?.trim();
   if (settings.demoMode) {
-    return { files: MOCK_FILES };
+    const files = normalizedSearch
+      ? MOCK_FILES.filter((f) => f.filename.toLowerCase().includes(normalizedSearch.toLowerCase()))
+      : MOCK_FILES;
+    return { files };
   }
   const params = new URLSearchParams();
   params.set('limit', limit.toString());
   if (cursor) params.set('cursor', cursor);
+  if (normalizedSearch) params.set('search', normalizedSearch);
 
   const res = await fetch(buildUrl(`/api/v1/files?${params.toString()}`), {
     headers: getHeaders(),

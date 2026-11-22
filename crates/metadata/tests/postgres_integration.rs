@@ -374,7 +374,7 @@ async fn list_files_paginates_newest_first_and_hides_uploads() {
         .await
         .unwrap();
 
-    let page1 = store.list_files(2, None).await.unwrap();
+    let page1 = store.list_files(2, None, None).await.unwrap();
     assert_eq!(
         page1
             .iter()
@@ -384,7 +384,7 @@ async fn list_files_paginates_newest_first_and_hides_uploads() {
     );
 
     let cursor1 = (page1[1].created_at, page1[1].file_id);
-    let page2 = store.list_files(2, Some(cursor1)).await.unwrap();
+    let page2 = store.list_files(2, Some(cursor1), None).await.unwrap();
     assert_eq!(
         page2
             .iter()
@@ -394,7 +394,7 @@ async fn list_files_paginates_newest_first_and_hides_uploads() {
     );
 
     let cursor2 = (page2[1].created_at, page2[1].file_id);
-    let page3 = store.list_files(2, Some(cursor2)).await.unwrap();
+    let page3 = store.list_files(2, Some(cursor2), None).await.unwrap();
     assert_eq!(
         page3
             .iter()
@@ -419,7 +419,11 @@ async fn list_files_paginates_newest_first_and_hides_uploads() {
 
     // An empty page past the end is not an error.
     let cursor3 = (page3[0].created_at, page3[0].file_id);
-    assert!(store.list_files(2, Some(cursor3)).await.unwrap().is_empty());
+    assert!(store
+        .list_files(2, Some(cursor3), None)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

@@ -319,16 +319,20 @@ impl CoordinatorClient {
 
     /// List committed files newest-first. Pass an empty cursor for the first
     /// page and the returned `next_cursor` for subsequent pages.
+    /// `search` optionally filters by filename (case-insensitive substring).
     pub async fn list_files(
         &mut self,
         limit: i32,
         cursor: String,
+        search: Option<String>,
     ) -> Result<crate::types::FileList, Box<dyn std::error::Error + Send + Sync>> {
+        let search = search.unwrap_or_default();
         let resp = self
             .with_retry(|inner| {
                 let req = request_with_id(ListFilesRequest {
                     limit,
                     cursor: cursor.clone(),
+                    search: search.clone(),
                 });
                 Box::pin(async move {
                     inner

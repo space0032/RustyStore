@@ -236,9 +236,11 @@ message DeleteFileResponse {
 
 // Newest-first keyset pagination over committed files. `cursor` is opaque; an
 // empty cursor starts at the newest file. `limit` 0 means the server default.
+// `search` optionally filters by filename (case-insensitive substring match).
 message ListFilesRequest {
   int32 limit = 1;
   string cursor = 2;
+  string search = 3;
 }
 
 message FileSummary {
