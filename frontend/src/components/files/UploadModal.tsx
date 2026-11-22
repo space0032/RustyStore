@@ -36,10 +36,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [items, setItems] = useState<UploadItem[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [chunkSize, setChunkSize] = useState<number>(4194304);
-  const [queueRunning, setQueueRunning] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const runIdRef = useRef(0);
   const itemsRef = useRef<UploadItem[]>([]);
+  const runningRef = useRef(false);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -47,8 +47,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
   const isBusy = items.some((i) => i.status === 'uploading');
   const resetQueue = useCallback(() => {
+    runIdRef.current += 1;
+    runningRef.current = false;
     setItems([]);
-    setQueueRunning(false);
   }, []);
 
   const handleClose = useCallback(() => {
@@ -85,8 +86,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   }, []);
 
   const runQueue = useCallback(async () => {
-    if (queueRunning) return;
-    setQueueRunning(true);
+    if (runningRef.current) return;
+    runningRef.current = true;
     const myRun = ++runIdRef.current;
     try {
       // Process sequentially to avoid overwhelming gateway and to keep UX predictable.
@@ -138,20 +139,19 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         await Promise.resolve();
       }
     } finally {
-      if (runIdRef.current === myRun) setQueueRunning(false);
+      if (runIdRef.current === myRun) runningRef.current = false;
     }
-  }, [chunkSize, onError, onSuccess, queueRunning, updateItem]);
+  }, [chunkSize, onError, onSuccess, updateItem]);
 
   // Kick queue when items change and there is queued work
   useEffect(() => {
     if (!isOpen) return;
     const hasQueued = items.some((i) => i.status === 'queued');
     const hasUploading = items.some((i) => i.status === 'uploading');
-    if (hasQueued && !hasUploading && !queueRunning) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional queue pump
+    if (hasQueued && !hasUploading && !runningRef.current) {
       void runQueue();
     }
-  }, [isOpen, items, queueRunning, runQueue]);
+  }, [isOpen, items, runQueue]);
 
   if (!isOpen) return null;
 
