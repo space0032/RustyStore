@@ -475,13 +475,16 @@ export function App() {
         </main>
       </div>
 
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        settings={settings}
-        onSave={handleSaveSettings}
-        onResetDemo={handleResetDemo}
-      />
+      {isSettingsOpen && (
+        <SettingsModal
+          key={JSON.stringify(settings)}
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          settings={settings}
+          onSave={handleSaveSettings}
+          onResetDemo={handleResetDemo}
+        />
+      )}
 
       <FileDetailsModal
         file={detailsFile}

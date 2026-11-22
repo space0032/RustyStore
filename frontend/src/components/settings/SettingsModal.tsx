@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { X, Sliders, Key, Server, RefreshCw, Sparkles, RotateCcw } from 'lucide-react';
 import { AppSettings, ConnectionTestResult, testConnection } from '../../services/api';
 import { useFocusTrap, useEscapeClose } from '../../hooks/useFocusTrap';
@@ -18,22 +18,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSave,
   onResetDemo,
 }) => {
-  const [form, setForm] = useState<AppSettings>({ ...settings });
+  const [form, setForm] = useState<AppSettings>(() => ({ ...settings }));
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const modalRef = useFocusTrap(isOpen);
   useEscapeClose(isOpen, onClose);
-
-  // The modal stays mounted; refresh the form whenever it opens or settings
-  // are changed elsewhere (e.g. the navbar Demo Mode toggle).
-  const settingsKey = JSON.stringify(settings);
-  useEffect(() => {
-    if (!isOpen) return;
-    // Reset local draft when modal opens or external settings change.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional sync reset on open/settings identity change
-    setForm(JSON.parse(settingsKey) as AppSettings);
-    setTestResult(null);
-  }, [isOpen, settingsKey]);
 
   if (!isOpen) return null;
 
